@@ -1,0 +1,42 @@
+appId: com.v2raydp.desktop
+productName: v2rayDP Desktop
+copyright: Copyright © 2026 Dineth Pansilu Wickramasinghe
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+
+extraResources:
+  - from: resources/bin
+    to: bin
+    filter:
+      - "**/*"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  icon: build/icon.png
+  requestedExecutionLevel: requireAdministrator
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: v2rayDP Desktop
+  runAfterFinish: true
+  installerIcon: build/icon.png
+  uninstallerIcon: build/icon.png
+
+portable:
+  artifactName: v2rayDP-Desktop-Portable-${version}.exe

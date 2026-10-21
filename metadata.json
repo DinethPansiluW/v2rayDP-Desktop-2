@@ -1,0 +1,6 @@
+{
+  "name": "v2rayDP Desktop",
+  "description": "High-performance full-device VLESS & VMess TUN VPN client powered by sing-box and Wintun with Wi-Fi SSID automation, hotspot sharing, ad-blocking, and latency testing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
