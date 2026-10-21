@@ -8,6 +8,8 @@ import { ServerProfile } from './types';
 export interface SingBoxConfigOptions {
   clashApiPort?: number;
   clashApiSecret?: string;
+  connectionMode?: 'tun' | 'system_proxy';
+  systemProxyPort?: number;
   tunInterfaceName?: string;
   tunStack?: 'mixed' | 'gvisor' | 'system';
   strictRoute?: boolean;
@@ -639,12 +641,19 @@ export class VmessLinkParser {
     };
 
     // 2. Inbounds
-    const tunStack = options.tunStack || 'mixed';
-    const strictRoute = options.strictRoute !== false;
+    const inbounds: Record<string, unknown>[] = [];
 
-    // tun inbound: strict_route, auto_route true, stack, no sniff field
-    const inbounds: Record<string, unknown>[] = [
-      {
+    if (options.connectionMode === 'system_proxy') {
+      inbounds.push({
+        type: 'mixed',
+        tag: 'mixed-system-proxy-in',
+        listen: '127.0.0.1',
+        listen_port: options.systemProxyPort || 10809
+      });
+    } else {
+      const tunStack = options.tunStack || 'mixed';
+      const strictRoute = options.strictRoute !== false;
+      inbounds.push({
         type: 'tun',
         tag: 'tun-in',
         interface_name: tunInterface,
@@ -652,8 +661,8 @@ export class VmessLinkParser {
         auto_route: true,
         strict_route: strictRoute,
         stack: tunStack
-      }
-    ];
+      });
+    }
 
     // Optional Hotspot mixed inbound (SOCKS5 + HTTP) on 0.0.0.0 (no sniff field)
     if (options.enableHotspot) {

@@ -134,6 +134,7 @@ export interface BlockSettings {
 
 export interface DesktopSettings {
   mode: 'tun'; // Sing-box TUN VPN
+  connectionMode?: 'tun' | 'system_proxy'; // "TUN (full device)" or "System proxy (fast)"
   primaryDns: string; // default 1.1.1.1
   secondaryDns: string; // default 8.8.8.8
   isBypassLan: boolean; // default true

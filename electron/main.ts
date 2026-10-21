@@ -63,6 +63,7 @@ let isStoppingIntentionally = false;
 let isQuitting = false;
 let cleanedUp = false;
 let currentClashApiPort = 9090;
+let currentTunName = 'v2raydp-tun';
 
 // Config store files in userData
 const userDataPath = app.getPath('userData');
@@ -128,6 +129,7 @@ function loadStore(): AppStore {
         exclude: parsed.exclude || { ...DEFAULT_EXCLUDE_SETTINGS },
         settings: {
           mode: 'tun',
+          connectionMode: parsed.settings?.connectionMode === 'system_proxy' ? 'system_proxy' : 'tun',
           primaryDns: parsed.settings?.primaryDns || '1.1.1.1',
           secondaryDns: parsed.settings?.secondaryDns || '8.8.8.8',
           isBypassLan: parsed.settings?.isBypassLan !== false,
@@ -177,6 +179,7 @@ function loadStore(): AppStore {
     exclude: { ...DEFAULT_EXCLUDE_SETTINGS },
     settings: {
       mode: 'tun',
+      connectionMode: 'tun',
       primaryDns: '1.1.1.1',
       secondaryDns: '8.8.8.8',
       isBypassLan: true,
@@ -321,23 +324,114 @@ function checkAdminElevation(): Promise<boolean> {
 }
 
 /**
- * Removes any stale v2raydp-tun adapter and routes before next start or on crash/quit
+ * Removes ghost Wintun and v2raydp* network adapters and stale VPN routes
+ * Runs pnputil /remove-device and Remove-NetAdapter in parallel with 4s timeout
+ * Checks Get-NetAdapter first to skip quickly if no stale adapters exist.
  */
 function cleanupStaleTunAndRoutes(): Promise<void> {
   return new Promise((resolve) => {
     if (process.platform !== 'win32') return resolve();
-    exec('route delete 0.0.0.0 mask 128.0.0.0 & route delete 128.0.0.0 mask 128.0.0.0', () => {
-      exec('netsh interface delete interface name="v2raydp-tun"', () => {
-        resolve();
-      });
-    });
+
+    // Do not run cleanup while VPN is actively connected
+    if (currentConnectionState.status === 'connected') return resolve();
+
+    // Clean routes first
+    exec('route delete 0.0.0.0 mask 128.0.0.0 & route delete 128.0.0.0 mask 128.0.0.0', { timeout: 2000 }, () => {});
+
+    // Quick check: see if any v2raydp* adapters exist before running full pnputil scan
+    exec(
+      'powershell -NoProfile -ExecutionPolicy Bypass -Command "(Get-NetAdapter -Name \'v2raydp*\' -ErrorAction SilentlyContinue).Count"',
+      { timeout: 1500 },
+      (checkErr, stdout) => {
+        const count = parseInt((stdout || '').trim(), 10);
+        if (!isNaN(count) && count === 0) {
+          // No stale v2raydp adapters found; instant return to keep connection startup < 2-4s
+          return resolve();
+        }
+
+        let completed = 0;
+        let resolved = false;
+
+        const done = () => {
+          completed++;
+          if (completed >= 2 && !resolved) {
+            resolved = true;
+            resolve();
+          }
+        };
+
+        const timer = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            resolve();
+          }
+        }, 4000);
+
+        // 1. Remove-NetAdapter
+        exec(
+          'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-NetAdapter -Name \'v2raydp*\' -ErrorAction SilentlyContinue | Remove-NetAdapter -Confirm:$false"',
+          { timeout: 3500 },
+          () => {
+            done();
+            if (completed >= 2) clearTimeout(timer);
+          }
+        );
+
+        // 2. Remove Wintun ghost devices via pnputil
+        exec(
+          'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-PnpDevice -Class Net -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like \'Wintun*\' -or $_.FriendlyName -like \'v2raydp*\' } | ForEach-Object { pnputil /remove-device $_.InstanceId }"',
+          { timeout: 3800 },
+          () => {
+            done();
+            if (completed >= 2) clearTimeout(timer);
+          }
+        );
+      }
+    );
   });
+}
+
+function enableWindowsSystemProxy(port = 10809): Promise<void> {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32') return resolve();
+    const cmd = `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 1 /f & reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer /t REG_SZ /d "127.0.0.1:${port}" /f`;
+    exec(cmd, { timeout: 3000 }, () => resolve());
+  });
+}
+
+function disableWindowsSystemProxy(): Promise<void> {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32') return resolve();
+    const cmd = `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f`;
+    exec(cmd, { timeout: 3000 }, () => resolve());
+  });
+}
+
+function cleanLogText(s: string): string {
+  if (!s) return '';
+  return s
+    .replace(/[\u001b\uFFFD\u241B]?\[[0-9;]*m/g, '')
+    .replace(/\r/g, '')
+    .replace(/\s+$/, '');
+}
+
+function formatLogForDisplay(rawText: string): string {
+  let cleaned = cleanLogText(rawText);
+  // Hide sing-box prefixes like "[0000] +0530 2026-10-21 " or "+0530 2026-10-21 12:34:56 " to keep timestamps clean
+  cleaned = cleaned.replace(/^(?:\[\d+\]\s*)?(?:[+-]\d{4}\s+)?(?:\d{4}-\d{2}-\d{2}\s+)?/, '');
+
+  if (cleaned.includes('Cannot create a file when that file already exists')) {
+    cleaned += ' (Old virtual adapter was found. Cleaning and retrying...)';
+  } else if (cleaned.includes('open interface take too much time')) {
+    cleaned += ' (Windows is slow creating the adapter. Waiting...)';
+  }
+  return cleaned;
 }
 
 /**
  * Fast Wintun adapter Up check via single netsh call (runs in background after clash_api is ready)
  */
-async function waitForTunAdapterUp(interfaceName = 'v2raydp-tun', timeoutMs = 8000): Promise<boolean> {
+async function waitForTunAdapterUp(interfaceName = currentTunName, timeoutMs = 8000): Promise<boolean> {
   if (process.platform !== 'win32') return true;
   const start = Date.now();
 
