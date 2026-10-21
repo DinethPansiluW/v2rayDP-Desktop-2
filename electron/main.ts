@@ -14,7 +14,7 @@
  * - Elevated Windows Task Scheduler for Start-with-Windows
  */
 
-import { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog } from 'electron';
+import { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, Notification } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -29,6 +29,7 @@ import {
   HotspotSettings,
   BlockSettings,
   DesktopSettings,
+  ExcludeSettings,
   AppLog,
   WifiStatus
 } from '../src/core/types';
@@ -36,6 +37,9 @@ import { VmessLinkParser } from '../src/core/VmessLinkParser';
 import { AutomationDecision } from '../src/core/AutomationDecision';
 import { BlockManager } from '../src/core/BlockManager';
 import defaultSources from '../src/assets/blocklist_sources.json';
+
+// Configure App User Model ID for Windows Toasts (must be before app ready)
+app.setAppUserModelId('com.v2raydp.desktop');
 
 // Single Instance Lock
 const gotTheLock = app.requestSingleInstanceLock();
@@ -73,9 +77,18 @@ interface AppStore {
   automation: AutomationSettings;
   hotspot: HotspotSettings;
   block: BlockSettings;
+  exclude: ExcludeSettings;
   settings: DesktopSettings;
   logs: AppLog[];
 }
+
+const DEFAULT_EXCLUDE_SETTINGS: ExcludeSettings = {
+  enabled: true,
+  bypassLan: true,
+  bypassDirectDomains: ['ir', 'cn', 'local', 'localhost'],
+  bypassDirectIps: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8'],
+  bypassProcesses: ['discord.exe', 'steam.exe', 'qbittorrent.exe']
+};
 
 function loadStore(): AppStore {
   try {
@@ -112,6 +125,7 @@ function loadStore(): AppStore {
           password: parsed.hotspot?.password
         },
         block: parsed.block || BlockManager.getDefaultSettings(),
+        exclude: parsed.exclude || { ...DEFAULT_EXCLUDE_SETTINGS },
         settings: {
           mode: 'tun',
           primaryDns: parsed.settings?.primaryDns || '1.1.1.1',
@@ -122,7 +136,8 @@ function loadStore(): AppStore {
           closeToTray: parsed.settings?.closeToTray !== false,
           startWithWindows: parsed.settings?.startWithWindows || false,
           startMinimized: parsed.settings?.startMinimized || false,
-          autoConnectOnLaunch: parsed.settings?.autoConnectOnLaunch || false
+          autoConnectOnLaunch: parsed.settings?.autoConnectOnLaunch || false,
+          showNotifications: parsed.settings?.showNotifications !== false
         },
         logs: parsed.logs || []
       };
@@ -159,6 +174,7 @@ function loadStore(): AppStore {
       requireAuth: false
     },
     block: BlockManager.getDefaultSettings(),
+    exclude: { ...DEFAULT_EXCLUDE_SETTINGS },
     settings: {
       mode: 'tun',
       primaryDns: '1.1.1.1',
@@ -169,7 +185,8 @@ function loadStore(): AppStore {
       closeToTray: true,
       startWithWindows: false,
       startMinimized: false,
-      autoConnectOnLaunch: false
+      autoConnectOnLaunch: false,
+      showNotifications: true
     },
     logs: []
   };
@@ -280,7 +297,7 @@ function killStaleProcesses(): Promise<void> {
 }
 
 /**
- * Checks admin elevation in dev mode. The packaged .exe is elevated via manifest.
+ * Checks admin elevation (Wintun adapter requires elevation)
  */
 function checkAdminElevation(): Promise<boolean> {
   return new Promise((resolve) => {
@@ -288,9 +305,83 @@ function checkAdminElevation(): Promise<boolean> {
       return resolve(true);
     }
     exec('fltmc', (err) => {
-      resolve(!err);
+      if (!err) return resolve(true);
+      exec('net session', (netErr) => {
+        resolve(!netErr);
+      });
     });
   });
+}
+
+/**
+ * Removes any stale v2raydp-tun adapter and routes before next start or on crash/quit
+ */
+function cleanupStaleTunAndRoutes(): Promise<void> {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32') return resolve();
+    exec('route delete 0.0.0.0 mask 128.0.0.0 & route delete 128.0.0.0 mask 128.0.0.0', () => {
+      exec('netsh interface delete interface name="v2raydp-tun"', () => {
+        resolve();
+      });
+    });
+  });
+}
+
+/**
+ * Wait until Wintun adapter is Up in Windows, then set metric to 1
+ */
+async function waitForTunAdapterUp(interfaceName = 'v2raydp-tun', timeoutMs = 10000): Promise<boolean> {
+  if (process.platform !== 'win32') return true;
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const isUp = await new Promise<boolean>((res) => {
+      exec(`netsh interface show interface name="${interfaceName}"`, (err, stdout) => {
+        if (!err && stdout && (stdout.includes('Connected') || stdout.includes('Up'))) {
+          return res(true);
+        }
+        exec(
+          `powershell -NoProfile -Command "(Get-NetAdapter -Name '${interfaceName}' -ErrorAction SilentlyContinue).Status"`,
+          (psErr, psOut) => {
+            if (!psErr && psOut && psOut.trim().toLowerCase() === 'up') {
+              return res(true);
+            }
+            res(false);
+          }
+        );
+      });
+    });
+
+    if (isUp) {
+      exec(`netsh interface ipv4 set interface "${interfaceName}" metric=1`, () => {});
+      addLog('INFO', 'TUN', `Wintun adapter "${interfaceName}" verified Up and metric set to 1.`);
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+
+  addLog('ERROR', 'TUN', `Timed out waiting for virtual network adapter "${interfaceName}" to reach Up state (10s).`);
+  return false;
+}
+
+/**
+ * Sends a native Windows toast notification if showNotifications is enabled
+ */
+function sendAppNotification(title: string, body: string): void {
+  if (store.settings.showNotifications === false) return;
+  try {
+    if (Notification && Notification.isSupported && Notification.isSupported()) {
+      const notif = new Notification({
+        title,
+        body,
+        icon: getAppIconPath(),
+        silent: false
+      });
+      notif.show();
+    }
+  } catch (err) {
+    console.error('Notification error:', err);
+  }
 }
 
 /**
@@ -478,8 +569,9 @@ function checkSingBoxConfig(binaryPath: string, configPath: string): Promise<{ o
   return new Promise((resolve) => {
     const binDir = path.dirname(binaryPath);
     exec(`"${binaryPath}" check -c "${configPath}"`, { cwd: binDir }, (err, stdout, stderr) => {
-      const output = `${stdout || ''}\n${stderr || ''}`.trim();
-      if (err) {
+      const raw = `${stdout || ''}\n${stderr || ''}`.trim();
+      const output = raw.replace(/\x1b\[[0-9;]*m/g, '');
+      if (err || output.includes('ERROR') || output.includes('FATAL')) {
         resolve({ ok: false, output });
       } else {
         resolve({ ok: true, output });
@@ -546,12 +638,14 @@ function waitForClashApiReady(port: number, child: ChildProcess, timeoutMs = 100
 
 async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
   await stopCurrentSingBoxProcess();
+  await cleanupStaleTunAndRoutes();
   stopTrafficMonitor();
 
   const binaryPath = getSingBoxExecutablePath();
   const wintunPath = getWintunDllPath();
   const desktopSettings = store.settings;
   const hotspot = store.hotspot;
+  const exclude = store.exclude;
 
   // Startup self-check: verify binaries exist
   if (!fs.existsSync(binaryPath)) {
@@ -565,6 +659,7 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     };
     mainWindow?.webContents.send('on-state-change', currentConnectionState);
     updateTrayMenu();
+    sendAppNotification('v2rayDP VPN', `VPN connection failed: sing-box not found`);
     return false;
   }
 
@@ -579,6 +674,7 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     };
     mainWindow?.webContents.send('on-state-change', currentConnectionState);
     updateTrayMenu();
+    sendAppNotification('v2rayDP VPN', `VPN connection failed: wintun.dll not found`);
     return false;
   }
 
@@ -594,23 +690,14 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
   mainWindow?.webContents.send('on-state-change', currentConnectionState);
   updateTrayMenu();
 
-  // Fast preflight server connectivity check
+  // Fast preflight server connectivity check (treats TLS error as reachable; warn only, do not block)
   addLog('INFO', 'sing-box', `Checking remote server availability: ${profile.address}:${profile.port}...`);
   const preflight = await fastNodeCheck(profile.address, profile.port, profile.tls, profile.sni, 2500);
   if (!preflight.ok) {
-    const errorMsg = `Server unreachable (${profile.address}:${profile.port}): ${preflight.error}`;
-    addLog('WARN', 'sing-box', errorMsg);
-    currentConnectionState = {
-      status: 'error',
-      reason: errorMsg,
-      errorMessage: errorMsg,
-      activeProfile: null
-    };
-    mainWindow?.webContents.send('on-state-change', currentConnectionState);
-    updateTrayMenu();
-    return false;
+    addLog('WARN', 'sing-box', `Preflight warning (${profile.address}:${profile.port}): ${preflight.error}. Proceeding with sing-box...`);
+  } else {
+    addLog('INFO', 'sing-box', `Server reached in ${preflight.latencyMs}ms. Generating TUN VPN configuration...`);
   }
-  addLog('INFO', 'sing-box', `Server reached in ${preflight.latencyMs}ms. Generating TUN VPN configuration...`);
 
   // Prepare adblock rule-set
   const activeBlockedDomains = getActiveBlockedDomains();
@@ -626,7 +713,10 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     hotspotRequireAuth: hotspot.requireAuth,
     hotspotUsername: hotspot.username,
     hotspotPassword: hotspot.password,
-    bypassLan: desktopSettings.isBypassLan,
+    bypassLan: exclude?.enabled ? exclude.bypassLan : desktopSettings.isBypassLan,
+    bypassDirectDomains: exclude?.enabled ? exclude.bypassDirectDomains : undefined,
+    bypassDirectIps: exclude?.enabled ? exclude.bypassDirectIps : undefined,
+    bypassProcesses: exclude?.enabled ? exclude.bypassProcesses : undefined,
     primaryDns: desktopSettings.primaryDns,
     secondaryDns: desktopSettings.secondaryDns,
     ruleSetPath,
@@ -650,6 +740,7 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     };
     mainWindow?.webContents.send('on-state-change', currentConnectionState);
     updateTrayMenu();
+    sendAppNotification('v2rayDP VPN', 'VPN connection failed: Invalid configuration');
     return false;
   }
 
@@ -733,6 +824,26 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
       };
       mainWindow?.webContents.send('on-state-change', currentConnectionState);
       updateTrayMenu();
+      sendAppNotification('v2rayDP VPN', `VPN connection failed: ${failReason.substring(0, 50)}`);
+      return false;
+    }
+
+    // Wait until Wintun virtual adapter is Up in Windows
+    const adapterUp = await waitForTunAdapterUp('v2raydp-tun', 10000);
+    if (!adapterUp) {
+      const failReason = 'Virtual network adapter "v2raydp-tun" did not reach Up state';
+      addLog('ERROR', 'TUN', failReason);
+      await stopCurrentSingBoxProcess();
+
+      currentConnectionState = {
+        status: 'error',
+        reason: failReason,
+        errorMessage: failReason,
+        activeProfile: null
+      };
+      mainWindow?.webContents.send('on-state-change', currentConnectionState);
+      updateTrayMenu();
+      sendAppNotification('v2rayDP VPN', `VPN connection failed: ${failReason}`);
       return false;
     }
 
@@ -766,6 +877,7 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
       'TUN',
       `Full-Device VPN active for "${profile.name}" via Wintun adapter (v2raydp-tun). All system traffic routed.`
     );
+    sendAppNotification('v2rayDP VPN', 'VPN service started');
     return true;
   } catch (err: unknown) {
     const errorMsg = (err as Error).message;
@@ -778,6 +890,7 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     };
     mainWindow?.webContents.send('on-state-change', currentConnectionState);
     updateTrayMenu();
+    sendAppNotification('v2rayDP VPN', `VPN connection failed: ${errorMsg}`);
     return false;
   }
 }
@@ -786,6 +899,7 @@ async function disconnectVpnInternal(reason = 'Disconnected'): Promise<void> {
   stopTrafficMonitor();
   await stopCurrentSingBoxProcess();
   await killStaleProcesses();
+  await cleanupStaleTunAndRoutes();
 
   currentConnectionState = {
     status: 'disconnected',
@@ -805,6 +919,7 @@ async function disconnectVpnInternal(reason = 'Disconnected'): Promise<void> {
   mainWindow?.webContents.send('on-traffic-stats', trafficStats);
   updateTrayMenu();
   addLog('INFO', 'TUN', `Disconnected: ${reason}. Wintun virtual adapter released.`);
+  sendAppNotification('v2rayDP VPN', 'VPN service stopped');
 }
 
 function startSingBox(profile: ServerProfile): Promise<boolean> {
@@ -1169,6 +1284,7 @@ async function cleanupEverything(): Promise<void> {
   stopWifiAutomationMonitor();
   await stopCurrentSingBoxProcess();
   await killStaleProcesses();
+  await cleanupStaleTunAndRoutes();
 }
 
 app.on('before-quit', async (event) => {
@@ -1211,8 +1327,9 @@ process.on('SIGTERM', async () => {
 
 // App Lifecycle
 app.whenReady().then(async () => {
-  // On startup kill any stale sing-box.exe processes
+  // On startup kill any stale sing-box.exe processes and remove stale tun adapters/routes
   await killStaleProcesses();
+  await cleanupStaleTunAndRoutes();
 
   // In dev mode, check admin elevation and inform user if not elevated
   if (!app.isPackaged && process.platform === 'win32') {
@@ -1709,6 +1826,36 @@ ipcMain.handle('reset-app', async () => {
   return true;
 });
 
+ipcMain.handle('get-exclude-settings', async () => store.exclude);
+ipcMain.handle('save-exclude-settings', async (_e, settings: ExcludeSettings) => {
+  store.exclude = settings;
+  saveStore();
+  await restartRunningProfileIfActive();
+  return true;
+});
+
+ipcMain.handle('check-admin-elevation', async () => {
+  return await checkAdminElevation();
+});
+
+ipcMain.handle('restart-as-admin', async () => {
+  if (process.platform !== 'win32') return false;
+  try {
+    const execPath = process.execPath;
+    const args = process.argv.slice(1).map((a) => `\`"${a}\`"`).join(' ');
+    const cmd = `Start-Process -FilePath "${execPath}" -ArgumentList '${args}' -Verb RunAs`;
+    exec(`powershell -NoProfile -Command "${cmd}"`, () => {});
+    setTimeout(() => {
+      isQuitting = true;
+      app.quit();
+    }, 500);
+    return true;
+  } catch (err) {
+    console.error('Failed to restart as admin:', err);
+    return false;
+  }
+});
+
 function verifyIpcHandlersRegistered(): void {
   const expectedChannels = [
     'get-profiles',
@@ -1729,6 +1876,10 @@ function verifyIpcHandlersRegistered(): void {
     'save-automation-settings',
     'get-wifi-status',
     'reset-manual-override',
+    'get-exclude-settings',
+    'save-exclude-settings',
+    'check-admin-elevation',
+    'restart-as-admin',
     'get-hotspot-info',
     'save-hotspot-settings',
     'open-hotspot-settings',

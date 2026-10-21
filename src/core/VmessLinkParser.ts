@@ -20,6 +20,9 @@ export interface SingBoxConfigOptions {
   logLevel?: 'trace' | 'debug' | 'info' | 'warn' | 'warning' | 'error' | 'none';
   ruleSetPath?: string;
   blockedDomains?: string[];
+  bypassDirectDomains?: string[];
+  bypassDirectIps?: string[];
+  bypassProcesses?: string[];
 }
 
 export class VmessLinkParser {
@@ -856,6 +859,26 @@ export class VmessLinkParser {
       routeRules.push({
         domain_suffix: options.blockedDomains,
         action: 'reject'
+      });
+    }
+
+    // Exclude / Split Tunneling direct rules
+    if (options.bypassProcesses && options.bypassProcesses.length > 0) {
+      routeRules.push({
+        process_name: options.bypassProcesses,
+        outbound: 'direct'
+      });
+    }
+    if (options.bypassDirectDomains && options.bypassDirectDomains.length > 0) {
+      routeRules.push({
+        domain_suffix: options.bypassDirectDomains,
+        outbound: 'direct'
+      });
+    }
+    if (options.bypassDirectIps && options.bypassDirectIps.length > 0) {
+      routeRules.push({
+        ip_cidr: options.bypassDirectIps,
+        outbound: 'direct'
       });
     }
 

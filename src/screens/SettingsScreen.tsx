@@ -39,6 +39,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   const [startWithWindows, setStartWithWindows] = useState(Boolean(settings.startWithWindows));
   const [startMinimized, setStartMinimized] = useState(Boolean(settings.startMinimized));
   const [autoConnectOnLaunch, setAutoConnectOnLaunch] = useState(Boolean(settings.autoConnectOnLaunch));
+  const [showNotifications, setShowNotifications] = useState(settings.showNotifications !== false);
 
   const [savedNotice, setSavedNotice] = useState(false);
   const [importNotice, setImportNotice] = useState<string | null>(null);
@@ -58,7 +59,8 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
       closeToTray,
       startWithWindows,
       startMinimized,
-      autoConnectOnLaunch
+      autoConnectOnLaunch,
+      showNotifications
     });
     setSavedNotice(true);
     setTimeout(() => setSavedNotice(false), 2500);
@@ -317,6 +319,23 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
                 type="checkbox"
                 checked={closeToTray}
                 onChange={(e) => setCloseToTray(e.target.checked)}
+                className="w-4 h-4 accent-cyan-400 cursor-pointer"
+              />
+            </div>
+
+            <div className="h-px bg-slate-800" />
+
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-200">Show Notifications</h4>
+                <p className="text-xs text-slate-400">
+                  Displays Windows desktop toast notifications when VPN service starts, stops, or encounters an error
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                checked={showNotifications}
+                onChange={(e) => setShowNotifications(e.target.checked)}
                 className="w-4 h-4 accent-cyan-400 cursor-pointer"
               />
             </div>

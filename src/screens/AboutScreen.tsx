@@ -50,8 +50,8 @@ export const AboutScreen: React.FC = () => {
       <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
         {/* App Hero */}
         <div className="flex flex-col sm:flex-row items-center sm:items-start space-y-4 sm:space-y-0 sm:space-x-5 text-center sm:text-left">
-          <div className="w-20 h-20 rounded-2xl bg-slate-900 border-2 border-cyan-400/80 p-1 shadow-xl shadow-cyan-500/20 flex items-center justify-center shrink-0">
-            <img src={logo} alt="v2rayDP Logo" className="w-full h-full object-contain rounded-xl" />
+          <div className="w-20 h-20 rounded-full bg-slate-900 border-2 border-cyan-400/80 p-1 shadow-xl shadow-cyan-500/20 flex items-center justify-center shrink-0 overflow-hidden">
+            <img src={logo} alt="v2rayDP Logo" className="w-full h-full rounded-full object-cover" />
           </div>
 
           <div className="space-y-1">

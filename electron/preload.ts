@@ -87,6 +87,17 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('on-log', handler);
   },
 
+  // Exclude / Split Tunneling
+  getExcludeSettings: () => ipcRenderer.invoke('get-exclude-settings'),
+  saveExcludeSettings: (settings: any) => ipcRenderer.invoke('save-exclude-settings', settings),
+
+  // Elevation & Clipboard
+  checkAdminElevation: () => ipcRenderer.invoke('check-admin-elevation'),
+  restartAsAdmin: () => ipcRenderer.invoke('restart-as-admin'),
+  readClipboardText: async () => {
+    return clipboard.readText();
+  },
+
   // Helpers
   openExternalUrl: (url: string) => ipcRenderer.invoke('open-external-url', url),
   copyToClipboard: async (text: string) => {
@@ -104,3 +115,4 @@ contextBridge.exposeInMainWorld('api', {
     });
   }
 });
+

@@ -29,6 +29,7 @@ const STORAGE_KEYS = {
   HOTSPOT: 'v2raydp_hotspot',
   BLOCK: 'v2raydp_block',
   SETTINGS: 'v2raydp_settings',
+  EXCLUDE: 'v2raydp_exclude',
   LOGS: 'v2raydp_logs'
 };
 
@@ -183,7 +184,16 @@ const DEFAULT_SETTINGS: DesktopSettings = {
   closeToTray: true,
   startWithWindows: false,
   startMinimized: false,
-  autoConnectOnLaunch: false
+  autoConnectOnLaunch: false,
+  showNotifications: true
+};
+
+const DEFAULT_EXCLUDE = {
+  enabled: true,
+  bypassLan: true,
+  bypassDirectDomains: ['ir', 'cn', 'local', 'localhost'],
+  bypassDirectIps: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8'],
+  bypassProcesses: ['discord.exe', 'steam.exe', 'qbittorrent.exe']
 };
 
 export function initMockApi(): ApiInterface {
@@ -799,6 +809,39 @@ export function initMockApi(): ApiInterface {
         const idx = logListeners.indexOf(callback);
         if (idx !== -1) logListeners.splice(idx, 1);
       };
+    },
+
+    // --- EXCLUDE / SPLIT TUNNELING ---
+    getExcludeSettings: async () => {
+      const data = localStorage.getItem(STORAGE_KEYS.EXCLUDE);
+      return data ? JSON.parse(data) : DEFAULT_EXCLUDE;
+    },
+
+    saveExcludeSettings: async (settings) => {
+      localStorage.setItem(STORAGE_KEYS.EXCLUDE, JSON.stringify(settings));
+      addLog('INFO', 'Routing', 'Saved exclusion / split tunneling settings');
+      return true;
+    },
+
+    // --- ELEVATION & CLIPBOARD ---
+    checkAdminElevation: async () => {
+      return true;
+    },
+
+    restartAsAdmin: async () => {
+      addLog('INFO', 'System', 'Relaunching process as Administrator...');
+      return true;
+    },
+
+    readClipboardText: async () => {
+      if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.readText) {
+        try {
+          return await navigator.clipboard.readText();
+        } catch {
+          return '';
+        }
+      }
+      return '';
     },
 
     // --- SYSTEM HELPERS ---

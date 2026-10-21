@@ -142,6 +142,15 @@ export interface DesktopSettings {
   startWithWindows: boolean;
   startMinimized: boolean;
   autoConnectOnLaunch: boolean;
+  showNotifications?: boolean; // default true
+}
+
+export interface ExcludeSettings {
+  enabled: boolean;
+  bypassLan: boolean;
+  bypassDirectDomains: string[];
+  bypassDirectIps: string[];
+  bypassProcesses: string[];
 }
 
 export interface AppLog {
@@ -198,6 +207,10 @@ export interface ApiInterface {
   onWifiStatusChange: (callback: (status: WifiStatus) => void) => () => void;
   resetManualOverride: () => Promise<void>;
 
+  // Exclude / Split Tunneling
+  getExcludeSettings: () => Promise<ExcludeSettings>;
+  saveExcludeSettings: (settings: ExcludeSettings) => Promise<boolean>;
+
   // Hotspot
   getHotspotInfo: () => Promise<HotspotInfo>;
   saveHotspotSettings: (settings: HotspotSettings) => Promise<boolean>;
@@ -217,6 +230,11 @@ export interface ApiInterface {
   saveDesktopSettings: (settings: DesktopSettings) => Promise<boolean>;
   resetApp: () => Promise<boolean>;
 
+  // Elevation & Clipboard
+  checkAdminElevation: () => Promise<boolean>;
+  restartAsAdmin: () => Promise<boolean>;
+  readClipboardText: () => Promise<string>;
+
   // Logs
   getLogs: () => Promise<AppLog[]>;
   clearLogs: () => Promise<boolean>;
@@ -233,3 +251,4 @@ declare global {
     api?: ApiInterface;
   }
 }
+

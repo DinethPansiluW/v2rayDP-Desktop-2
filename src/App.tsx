@@ -12,17 +12,19 @@ import {
   AppLog,
   WifiStatus
 } from './core/types';
-import { TopBar, ActiveTab } from './components/TopBar';
+import { Sidebar, ActiveTab } from './components/Sidebar';
 import { DashboardScreen } from './screens/DashboardScreen';
 import { AutomationScreen } from './screens/AutomationScreen';
+import { ExcludeScreen } from './screens/ExcludeScreen';
 import { HotspotScreen } from './screens/HotspotScreen';
 import { BlockingScreen } from './screens/BlockingScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { AboutScreen } from './screens/AboutScreen';
-import { CheckCircle2, AlertCircle, Info } from 'lucide-react';
+import { CheckCircle2, AlertCircle, Info, ShieldAlert } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('home');
+  const [isElevated, setIsElevated] = useState<boolean>(true);
 
   // Core application states
   const [profiles, setProfiles] = useState<ServerProfile[]>([]);
@@ -114,139 +116,191 @@ export default function App() {
     closeToTray: true,
     startWithWindows: false,
     startMinimized: false,
-    autoConnectOnLaunch: false
+    autoConnectOnLaunch: false,
+    showNotifications: true
   });
   const [logs, setLogs] = useState<AppLog[]>([]);
 
-  // Toast notification
+  // Toast banner
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ message, type });
-    setTimeout(() => setToast(null), 3000);
+    setTimeout(() => {
+      setToast(null);
+    }, 3000);
   };
 
-  // Initial Data Load & Event Subscriptions
+  // Initialization & Event Subscriptions
   useEffect(() => {
-    if (!window.api) return;
+    const init = async () => {
+      if (!window.api) return;
 
-    // Load initial data
-    window.api.getProfiles().then(setProfiles);
-    window.api.getConnectionState().then(setConnectionState);
-    window.api.getTrafficStats().then(setTrafficStats);
-    window.api.getAutomationSettings().then(setAutomationSettings);
-    window.api.getWifiStatus().then(setWifiStatus);
-    window.api.getHotspotInfo().then(setHotspotInfo);
-    window.api.getBlockSettings().then(setBlockSettings);
-    window.api.getDesktopSettings().then(setDesktopSettings);
-    window.api.getLogs().then(setLogs);
+      try {
+        const [p, c, t, a, w, h, hi, b, d, l] = await Promise.all([
+          window.api.getProfiles(),
+          window.api.getConnectionState(),
+          window.api.getTrafficStats(),
+          window.api.getAutomationSettings(),
+          window.api.getWifiStatus(),
+          window.api.getHotspotInfo(),
+          window.api.getHotspotInfo(),
+          window.api.getBlockSettings(),
+          window.api.getDesktopSettings(),
+          window.api.getLogs()
+        ]);
 
-    // Subscriptions
-    const unsubState = window.api.onStateChange((state) => {
+        setProfiles(p || []);
+        setConnectionState(c || { status: 'disconnected', reason: 'Idle', activeProfile: null });
+        setTrafficStats(t || { uploadSpeedBps: 0, downloadSpeedBps: 0, sessionTxBytes: 0, sessionRxBytes: 0, connectedDurationSeconds: 0 });
+        setAutomationSettings(a);
+        setWifiStatus(w || { connected: false, ssid: null });
+        setHotspotInfo(hi || { isSharing: false, socksPort: 10808, httpPort: 10809, ipAddresses: [] });
+        setBlockSettings(b);
+        setDesktopSettings(d);
+        setLogs(l || []);
+
+        if (window.api.checkAdminElevation) {
+          const elevated = await window.api.checkAdminElevation();
+          setIsElevated(elevated);
+        }
+      } catch (err) {
+        console.error('Initialization error:', err);
+      }
+    };
+
+    init();
+
+    // Stream listeners
+    const unbindState = window.api?.onStateChange?.((state) => {
       setConnectionState(state);
     });
 
-    const unsubTraffic = window.api.onTrafficStats((stats) => {
+    const unbindTraffic = window.api?.onTrafficStats?.((stats) => {
       setTrafficStats(stats);
     });
 
-    const unsubWifi = window.api.onWifiStatusChange((status) => {
+    const unbindWifi = window.api?.onWifiStatusChange?.((status) => {
       setWifiStatus(status);
     });
 
-    const unsubLogs = window.api.onLog((log) => {
-      setLogs((prev) => [log, ...prev.slice(0, 299)]);
+    const unbindLog = window.api?.onLog?.((log) => {
+      setLogs((prev) => [log, ...prev].slice(0, 500));
     });
 
     return () => {
-      unsubState();
-      unsubTraffic();
-      unsubWifi();
-      unsubLogs();
+      unbindState?.();
+      unbindTraffic?.();
+      unbindWifi?.();
+      unbindLog?.();
     };
   }, []);
 
-  // Handler functions
-  const handleStartVpn = async (profileId?: string) => {
+  // Action Handlers
+  const handleStartVpn = async (profileId?: string): Promise<boolean> => {
     if (!window.api) return false;
-    const ok = await window.api.startVpn(profileId);
-    if (ok) showToast('Connecting to proxy…', 'info');
-    return ok;
+    try {
+      const ok = await window.api.startVpn(profileId);
+      if (!ok) {
+        const s = await window.api.getConnectionState();
+        setConnectionState(s);
+      }
+      return ok;
+    } catch (err: unknown) {
+      showToast((err as Error).message, 'error');
+      return false;
+    }
   };
 
-  const handleStopVpn = async () => {
+  const handleStopVpn = async (reason = 'Stopped by user'): Promise<boolean> => {
     if (!window.api) return false;
-    const ok = await window.api.stopVpn('User tapped Disconnect');
-    if (ok) showToast('Disconnected from proxy', 'info');
-    return ok;
+    try {
+      const ok = await window.api.stopVpn(reason);
+      return ok;
+    } catch (err: unknown) {
+      showToast((err as Error).message, 'error');
+      return false;
+    }
   };
 
-  const handleSelectProfile = async (id: string) => {
+  const handleSelectProfile = async (id: string): Promise<boolean> => {
     if (!window.api) return false;
     const ok = await window.api.selectProfile(id);
-    const updated = await window.api.getProfiles();
-    setProfiles(updated);
+    if (ok) {
+      const updated = await window.api.getProfiles();
+      setProfiles(updated);
+    }
     return ok;
   };
 
-  const handleSaveProfile = async (profileData: Partial<ServerProfile>) => {
+  const handleSaveProfile = async (profile: Partial<ServerProfile>) => {
     if (!window.api) return;
-    await window.api.saveProfile(profileData);
-    const updated = await window.api.getProfiles();
-    setProfiles(updated);
-    showToast('Profile saved successfully', 'success');
+    try {
+      await window.api.saveProfile(profile);
+      const updated = await window.api.getProfiles();
+      setProfiles(updated);
+    } catch (err: unknown) {
+      showToast((err as Error).message, 'error');
+      throw err;
+    }
   };
 
-  const handleDeleteProfile = async (id: string) => {
+  const handleDeleteProfile = async (id: string): Promise<boolean> => {
     if (!window.api) return false;
     const ok = await window.api.deleteProfile(id);
-    const updated = await window.api.getProfiles();
-    setProfiles(updated);
-    showToast('Profile deleted', 'info');
+    if (ok) {
+      const updated = await window.api.getProfiles();
+      setProfiles(updated);
+    }
     return ok;
   };
 
-  const handleDuplicateProfile = async (id: string) => {
+  const handleDuplicateProfile = async (id: string): Promise<ServerProfile> => {
     if (!window.api) throw new Error('API unavailable');
     const dup = await window.api.duplicateProfile(id);
     const updated = await window.api.getProfiles();
     setProfiles(updated);
-    showToast(`Duplicated: ${dup.name}`, 'success');
     return dup;
   };
 
-  const handleTestPing = async (id: string) => {
+  const handleTestPing = async (id: string): Promise<number> => {
     if (!window.api) return -1;
-    const ms = await window.api.testLatency(id);
+    const latency = await window.api.testLatency(id);
     const updated = await window.api.getProfiles();
     setProfiles(updated);
-    return ms;
+    return latency;
   };
 
-  const handleTestAllPings = async () => {
+  const handleTestAllPings = async (): Promise<Record<string, number>> => {
     if (!window.api) return {};
-    const results = await window.api.testAllLatencies();
+    const res = await window.api.testAllLatencies();
     const updated = await window.api.getProfiles();
     setProfiles(updated);
-    showToast(`Tested latency for ${updated.length} nodes`, 'info');
-    return results;
+    return res;
   };
 
   const handleImportClipboard = async () => {
     if (!window.api) return;
     try {
-      const text = await navigator.clipboard.readText();
-      if (!text || (!text.includes('vless://') && !text.includes('vmess://'))) {
-        showToast('Clipboard does not contain vless:// or vmess:// links', 'error');
+      let text = '';
+      if (window.api.readClipboardText) {
+        text = await window.api.readClipboardText();
+      } else if (navigator.clipboard) {
+        text = await navigator.clipboard.readText();
+      }
+      if (!text) {
+        showToast('Clipboard is empty', 'error');
         return;
       }
       const res = await window.api.importProfilesFromText(text);
       if (res.added > 0) {
         const updated = await window.api.getProfiles();
         setProfiles(updated);
-        showToast(`Imported ${res.added} node${res.added > 1 ? 's' : ''}`, 'success');
+        showToast(`Imported ${res.added} profile${res.added > 1 ? 's' : ''}`, 'success');
       } else if (res.errors.length > 0) {
-        showToast(res.errors[0], 'error');
+        showToast(`Import error: ${res.errors[0]}`, 'error');
+      } else {
+        showToast('No valid link found', 'error');
       }
     } catch (err: unknown) {
       showToast((err as Error).message, 'error');
@@ -256,16 +310,13 @@ export default function App() {
   const handleImportFile = async (content: string) => {
     if (!window.api) return;
     try {
-      let res = await window.api.importProfilesFromText(content);
-      if (res.added === 0 && content.trim().startsWith('[')) {
-        res = await window.api.importProfilesJson(content);
-      }
+      const res = await window.api.importProfilesFromText(content);
       if (res.added > 0) {
         const updated = await window.api.getProfiles();
         setProfiles(updated);
-        showToast(`Imported ${res.added} node${res.added > 1 ? 's' : ''}`, 'success');
-      } else if (res.errors.length > 0) {
-        showToast(res.errors[0], 'error');
+        showToast(`Imported ${res.added} profile${res.added > 1 ? 's' : ''}`, 'success');
+      } else {
+        showToast('No valid profiles found in file', 'error');
       }
     } catch (err: unknown) {
       showToast((err as Error).message, 'error');
@@ -280,170 +331,199 @@ export default function App() {
     return ok;
   };
 
+  const handleRestartAsAdmin = async () => {
+    if (window.api?.restartAsAdmin) {
+      await window.api.restartAsAdmin();
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-[#090d16] text-slate-100 flex flex-col font-sans">
-      {/* Top Bar Navigation */}
-      <TopBar
+    <div className="min-h-screen bg-[#090d16] text-slate-100 flex font-sans overflow-hidden">
+      {/* NetMod Style Left Sidebar (Narrow, icons only, tooltip on hover) */}
+      <Sidebar
         activeTab={activeTab}
         onTabChange={setActiveTab}
         connectionState={connectionState}
         hotspotEnabled={hotspotSettings.isHotspotSharingEnabled}
         adBlockEnabled={blockSettings.isBlockingEnabled}
+        isElevated={isElevated}
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6">
-        {activeTab === 'dashboard' && (
-          <DashboardScreen
-            connectionState={connectionState}
-            trafficStats={trafficStats}
-            profiles={profiles}
-            logs={logs}
-            onStartVpn={handleStartVpn}
-            onStopVpn={handleStopVpn}
-            onSelectProfile={handleSelectProfile}
-            onSaveProfile={handleSaveProfile}
-            onDeleteProfile={handleDeleteProfile}
-            onDuplicateProfile={handleDuplicateProfile}
-            onTestPing={handleTestPing}
-            onTestAllPings={handleTestAllPings}
-            onImportClipboard={handleImportClipboard}
-            onImportFile={handleImportFile}
-            onClearLogs={handleClearLogs}
-          />
+      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-y-auto">
+        {/* Administrator Elevation Warning Banner */}
+        {!isElevated && (
+          <div className="bg-amber-950/90 border-b border-amber-600/60 px-4 py-2.5 flex items-center justify-between text-xs text-amber-200 shrink-0">
+            <div className="flex items-center space-x-2 min-w-0">
+              <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="truncate">
+                <strong>Administrator privileges required:</strong> Wintun TUN virtual network adapter needs elevated privileges.
+              </span>
+            </div>
+            <button
+              onClick={handleRestartAsAdmin}
+              className="px-3.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shrink-0 ml-4 shadow-sm transition-colors"
+            >
+              Restart as Administrator
+            </button>
+          </div>
         )}
 
-        {activeTab === 'automation' && (
-          <AutomationScreen
-            settings={automationSettings}
-            desktopSettings={desktopSettings}
-            wifiStatus={wifiStatus}
-            profiles={profiles}
-            onSaveSettings={async (newSettings) => {
-              if (!window.api) return false;
-              const ok = await window.api.saveAutomationSettings(newSettings);
-              setAutomationSettings(newSettings);
-              showToast('Automation settings saved', 'success');
-              return ok;
-            }}
-            onSaveDesktopSettings={async (newSettings) => {
-              if (!window.api) return false;
-              const ok = await window.api.saveDesktopSettings(newSettings);
-              setDesktopSettings(newSettings);
-              showToast('Startup settings saved', 'success');
-              return ok;
-            }}
-            onResetManualOverride={async () => {
-              if (!window.api) return;
-              await window.api.resetManualOverride();
-              const s = await window.api.getAutomationSettings();
-              setAutomationSettings(s);
-              showToast('Manual override cleared', 'info');
-            }}
-          />
-        )}
+        <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6">
+          {(activeTab === 'home' || (activeTab as string) === 'dashboard') && (
+            <DashboardScreen
+              connectionState={connectionState}
+              trafficStats={trafficStats}
+              profiles={profiles}
+              logs={logs}
+              onStartVpn={handleStartVpn}
+              onStopVpn={handleStopVpn}
+              onSelectProfile={handleSelectProfile}
+              onSaveProfile={handleSaveProfile}
+              onDeleteProfile={handleDeleteProfile}
+              onDuplicateProfile={handleDuplicateProfile}
+              onTestPing={handleTestPing}
+              onTestAllPings={handleTestAllPings}
+              onImportClipboard={handleImportClipboard}
+              onImportFile={handleImportFile}
+              onClearLogs={handleClearLogs}
+            />
+          )}
 
-        {activeTab === 'hotspot' && (
-          <HotspotScreen
-            hotspotInfo={hotspotInfo}
-            hotspotSettings={hotspotSettings}
-            onSaveHotspotSettings={async (newSettings) => {
-              if (!window.api) return false;
-              const ok = await window.api.saveHotspotSettings(newSettings);
-              setHotspotSettings(newSettings);
-              const info = await window.api.getHotspotInfo();
-              setHotspotInfo(info);
-              showToast('Hotspot sharing settings saved', 'success');
-              return ok;
-            }}
-            onOpenMobileHotspot={async () => {
-              if (!window.api) return false;
-              return await window.api.openHotspotSettings();
-            }}
-            onAddFirewallRule={async (port) => {
-              if (!window.api) return { success: false, message: 'API unavailable' };
-              return await window.api.addFirewallRule(port);
-            }}
-            onRemoveFirewallRule={async (port) => {
-              if (!window.api) return { success: false, message: 'API unavailable' };
-              return await window.api.removeFirewallRule(port);
-            }}
-          />
-        )}
+          {activeTab === 'automation' && (
+            <AutomationScreen
+              settings={automationSettings}
+              desktopSettings={desktopSettings}
+              wifiStatus={wifiStatus}
+              profiles={profiles}
+              onSaveSettings={async (newSettings) => {
+                if (!window.api) return false;
+                const ok = await window.api.saveAutomationSettings(newSettings);
+                setAutomationSettings(newSettings);
+                showToast('Automation settings saved', 'success');
+                return ok;
+              }}
+              onSaveDesktopSettings={async (newSettings) => {
+                if (!window.api) return false;
+                const ok = await window.api.saveDesktopSettings(newSettings);
+                setDesktopSettings(newSettings);
+                showToast('Startup settings saved', 'success');
+                return ok;
+              }}
+              onResetManualOverride={async () => {
+                if (!window.api) return;
+                await window.api.resetManualOverride();
+                const s = await window.api.getAutomationSettings();
+                setAutomationSettings(s);
+                showToast('Manual override cleared', 'info');
+              }}
+            />
+          )}
 
-        {activeTab === 'blocking' && (
-          <BlockingScreen
-            blockSettings={blockSettings}
-            onSaveSettings={async (newSettings) => {
-              if (!window.api) return false;
-              const ok = await window.api.saveBlockSettings(newSettings);
-              setBlockSettings(newSettings);
-              showToast('Ad blocking settings updated', 'success');
-              return ok;
-            }}
-            onUpdateLists={async () => {
-              if (!window.api) return { success: false, count: 0 };
-              const res = await window.api.updateBlocklists();
-              const s = await window.api.getBlockSettings();
-              setBlockSettings(s);
-              if (res.success) {
-                showToast(`Updated ${res.count.toLocaleString()} blocked domains`, 'success');
-              }
-              return res;
-            }}
-            onAddCustomRule={async (domain) => {
-              if (!window.api) return false;
-              const ok = await window.api.addCustomBlockRule(domain);
-              const s = await window.api.getBlockSettings();
-              setBlockSettings(s);
-              if (ok) showToast(`Added ${domain} to blocklist`, 'success');
-              return ok;
-            }}
-            onRemoveCustomRule={async (domain) => {
-              if (!window.api) return false;
-              const ok = await window.api.removeCustomBlockRule(domain);
-              const s = await window.api.getBlockSettings();
-              setBlockSettings(s);
-              showToast(`Removed ${domain}`, 'info');
-              return ok;
-            }}
-          />
-        )}
+          {activeTab === 'exclude' && <ExcludeScreen />}
 
-        {activeTab === 'settings' && (
-          <SettingsScreen
-            settings={desktopSettings}
-            onSaveSettings={async (newSettings) => {
-              if (!window.api) return false;
-              const ok = await window.api.saveDesktopSettings(newSettings);
-              setDesktopSettings(newSettings);
-              showToast('Settings saved', 'success');
-              return ok;
-            }}
-            onExportProfiles={async () => {
-              if (!window.api) return '[]';
-              return await window.api.exportProfilesJson();
-            }}
-            onImportProfiles={async (json) => {
-              if (!window.api) return { added: 0, errors: ['API unavailable'] };
-              const res = await window.api.importProfilesJson(json);
-              const updated = await window.api.getProfiles();
-              setProfiles(updated);
-              return res;
-            }}
-            onResetApp={async () => {
-              if (!window.api) return false;
-              return await window.api.resetApp();
-            }}
-          />
-        )}
+          {activeTab === 'hotspot' && (
+            <HotspotScreen
+              hotspotInfo={hotspotInfo}
+              hotspotSettings={hotspotSettings}
+              onSaveHotspotSettings={async (newSettings) => {
+                if (!window.api) return false;
+                const ok = await window.api.saveHotspotSettings(newSettings);
+                setHotspotSettings(newSettings);
+                const info = await window.api.getHotspotInfo();
+                setHotspotInfo(info);
+                showToast('Hotspot sharing settings saved', 'success');
+                return ok;
+              }}
+              onOpenMobileHotspot={async () => {
+                if (!window.api) return false;
+                return await window.api.openHotspotSettings();
+              }}
+              onAddFirewallRule={async (port) => {
+                if (!window.api) return { success: false, message: 'API unavailable' };
+                return await window.api.addFirewallRule(port);
+              }}
+              onRemoveFirewallRule={async (port) => {
+                if (!window.api) return { success: false, message: 'API unavailable' };
+                return await window.api.removeFirewallRule(port);
+              }}
+            />
+          )}
 
-        {activeTab === 'about' && <AboutScreen />}
-      </main>
+          {activeTab === 'blocking' && (
+            <BlockingScreen
+              blockSettings={blockSettings}
+              onSaveSettings={async (newSettings) => {
+                if (!window.api) return false;
+                const ok = await window.api.saveBlockSettings(newSettings);
+                setBlockSettings(newSettings);
+                showToast('Ad blocking settings updated', 'success');
+                return ok;
+              }}
+              onUpdateLists={async () => {
+                if (!window.api) return { success: false, count: 0 };
+                const res = await window.api.updateBlocklists();
+                const s = await window.api.getBlockSettings();
+                setBlockSettings(s);
+                if (res.success) {
+                  showToast(`Updated ${res.count.toLocaleString()} blocked domains`, 'success');
+                }
+                return res;
+              }}
+              onAddCustomRule={async (domain) => {
+                if (!window.api) return false;
+                const ok = await window.api.addCustomBlockRule(domain);
+                const s = await window.api.getBlockSettings();
+                setBlockSettings(s);
+                if (ok) showToast(`Added ${domain} to blocklist`, 'success');
+                return ok;
+              }}
+              onRemoveCustomRule={async (domain) => {
+                if (!window.api) return false;
+                const ok = await window.api.removeCustomBlockRule(domain);
+                const s = await window.api.getBlockSettings();
+                setBlockSettings(s);
+                showToast(`Removed ${domain}`, 'info');
+                return ok;
+              }}
+            />
+          )}
 
-      {/* Floating Toast Notification */}
+          {activeTab === 'settings' && (
+            <SettingsScreen
+              settings={desktopSettings}
+              onSaveSettings={async (newSettings) => {
+                if (!window.api) return false;
+                const ok = await window.api.saveDesktopSettings(newSettings);
+                setDesktopSettings(newSettings);
+                showToast('Settings saved', 'success');
+                return ok;
+              }}
+              onExportProfiles={async () => {
+                if (!window.api) return '[]';
+                return await window.api.exportProfilesJson();
+              }}
+              onImportProfiles={async (json) => {
+                if (!window.api) return { added: 0, errors: ['API unavailable'] };
+                const res = await window.api.importProfilesJson(json);
+                const updated = await window.api.getProfiles();
+                setProfiles(updated);
+                return res;
+              }}
+              onResetApp={async () => {
+                if (!window.api) return false;
+                return await window.api.resetApp();
+              }}
+            />
+          )}
+
+          {activeTab === 'about' && <AboutScreen />}
+        </main>
+      </div>
+
+      {/* Floating Global Toast Notification */}
       {toast && (
-        <div className="fixed bottom-6 right-6 z-50 animate-bounce">
+        <div className="fixed bottom-6 left-24 z-50 animate-bounce">
           <div
             className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center space-x-2 shadow-2xl border ${
               toast.type === 'success'
