@@ -48,10 +48,13 @@ export const AboutScreen: React.FC = () => {
 
       {/* Main Info Card */}
       <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
-        {/* App Hero */}
-        <div className="flex flex-col sm:flex-row items-center sm:items-start space-y-4 sm:space-y-0 sm:space-x-5 text-center sm:text-left">
-          <div className="w-20 h-20 rounded-full bg-slate-900 border-2 border-cyan-400/80 p-1 shadow-xl shadow-cyan-500/20 flex items-center justify-center shrink-0 overflow-hidden">
-            <img src={logo} alt="v2rayDP Logo" className="w-full h-full rounded-full object-cover" />
+        <div className="flex flex-col sm:flex-row items-center sm:items-start space-y-4 sm:space-y-0 sm:space-x-6 text-center sm:text-left">
+          <div className="shrink-0 flex items-center justify-center">
+            <img
+              src={logo}
+              alt="v2rayDP"
+              className="w-24 h-24 rounded-full object-cover aspect-square ring-2 ring-blue-500/40 shadow-[0_0_20px_rgba(59,130,246,0.35)]"
+            />
           </div>
 
           <div className="space-y-1">

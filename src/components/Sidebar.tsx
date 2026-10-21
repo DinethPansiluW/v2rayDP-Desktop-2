@@ -46,16 +46,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <button
           onClick={() => onTabChange('home')}
           title="v2rayDP Desktop"
-          className="group relative w-10 h-10 rounded-full p-0.5 bg-slate-900 border-2 border-cyan-500/50 hover:border-cyan-400 transition-all shadow-md shadow-cyan-500/20 flex items-center justify-center overflow-hidden hover:scale-105 active:scale-95"
+          className="group relative w-10 h-10 rounded-full flex items-center justify-center overflow-visible hover:scale-105 active:scale-95 transition-all"
         >
           <img
             src={logo}
-            alt="Logo"
-            className="w-full h-full rounded-full object-cover"
+            alt="v2rayDP"
+            className="w-10 h-10 rounded-full object-cover aspect-square ring-2 ring-blue-500/40 shadow-[0_0_20px_rgba(59,130,246,0.35)]"
           />
           {/* Status Indicator Dot on logo */}
           <span
-            className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-[#0a0f1d] ${
+            className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#0a0f1d] z-10 ${
               isConnected
                 ? 'bg-emerald-400'
                 : isConnecting

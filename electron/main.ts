@@ -263,11 +263,18 @@ function getWintunDllPath(): string {
   }
 }
 
-function getAppIconPath(): string {
+function getAppIconPath(variant: 'color' | 'gray' = 'color'): string {
+  const filename = variant === 'gray' ? 'app_logo_gray.png' : 'app_logo.png';
   if (app.isPackaged) {
-    return path.join(app.getAppPath(), 'dist', 'app_logo.png');
+    const resPath = process.resourcesPath;
+    if (resPath && fs.existsSync(path.join(resPath, filename))) {
+      return path.join(resPath, filename);
+    }
+    const distPath = path.join(app.getAppPath(), 'dist', filename);
+    if (fs.existsSync(distPath)) return distPath;
+    return path.join(app.getAppPath(), 'public', filename);
   } else {
-    return path.join(app.getAppPath(), 'public', 'app_logo.png');
+    return path.join(app.getAppPath(), 'public', filename);
   }
 }
 
@@ -1164,9 +1171,33 @@ function updateTrayMenu(): void {
   if (!tray) return;
 
   const isConnected = currentConnectionState.status === 'connected';
+  const isConnecting = currentConnectionState.status === 'connecting';
+  const isError = currentConnectionState.status === 'error';
+
+  // Dynamic Tray Icon: connected = original logo, disconnected = grayscale/dim overlay
+  const trayIconFile = (isConnected || isConnecting)
+    ? getAppIconPath('color')
+    : getAppIconPath('gray');
+
+  if (fs.existsSync(trayIconFile)) {
+    try {
+      const trayImg = nativeImage
+        .createFromPath(trayIconFile)
+        .resize({ width: 16, height: 16, quality: 'best' });
+      tray.setImage(trayImg);
+    } catch (err) {
+      console.error('Failed to update tray icon:', err);
+    }
+  }
+
+  let statusLabel = 'Disconnected';
+  if (isConnected) statusLabel = `Connected (TUN) - ${currentConnectionState.profileName || 'Active'}`;
+  else if (isConnecting) statusLabel = 'Connecting...';
+  else if (isError) statusLabel = 'Connection Error';
+
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: `v2rayDP Desktop - ${isConnected ? 'Connected (TUN)' : 'Disconnected'}`,
+      label: `v2rayDP Desktop - ${statusLabel}`,
       enabled: false
     },
     { type: 'separator' },
@@ -1202,11 +1233,11 @@ function updateTrayMenu(): void {
   ]);
 
   tray.setContextMenu(contextMenu);
-  tray.setToolTip(`v2rayDP Desktop (${isConnected ? 'Connected - TUN' : 'Disconnected'})`);
+  tray.setToolTip(`v2rayDP Desktop (${statusLabel})`);
 }
 
 function createMainWindow(): void {
-  const iconPath = getAppIconPath();
+  const iconPath = getAppIconPath('color');
   const iconImage = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
   const shouldStartMinimized = store.settings.startMinimized || process.argv.includes('--minimized');
 
@@ -1252,11 +1283,12 @@ function createMainWindow(): void {
 }
 
 function createSystemTray(): void {
-  const iconPath = getAppIconPath();
+  const isConnected = currentConnectionState.status === 'connected';
+  const iconPath = getAppIconPath(isConnected ? 'color' : 'gray');
   if (!fs.existsSync(iconPath)) return;
 
   try {
-    const trayImg = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+    const trayImg = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16, quality: 'best' });
     tray = new Tray(trayImg);
 
     tray.on('double-click', () => {
