@@ -40,6 +40,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
   const [grpcMode, setGrpcMode] = useState('gun');
   const [pinnedPeerCertSha256, setPinnedPeerCertSha256] = useState('');
   const [verifyPeerCertByName, setVerifyPeerCertByName] = useState('');
+  const [allowInsecure, setAllowInsecure] = useState(true);
 
   const [activeTab, setActiveTab] = useState<'basic' | 'transport' | 'tls'>('basic');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -70,6 +71,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
       setGrpcMode(profile.grpcMode || 'gun');
       setPinnedPeerCertSha256(profile.pinnedPeerCertSha256 || '');
       setVerifyPeerCertByName(profile.verifyPeerCertByName || '');
+      setAllowInsecure(profile.allowInsecure !== false);
     } else {
       setName(defaultProtocol === 'vless' ? 'New VLESS Reality Node' : 'New Node');
       setProtocol(defaultProtocol);
@@ -94,6 +96,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
       setGrpcMode('gun');
       setPinnedPeerCertSha256('');
       setVerifyPeerCertByName('');
+      setAllowInsecure(true);
     }
     setError(null);
   }, [profile, defaultProtocol, isOpen]);
@@ -143,7 +146,8 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
         serviceName: serviceName.trim(),
         grpcMode,
         pinnedPeerCertSha256: pinnedPeerCertSha256.trim(),
-        verifyPeerCertByName: verifyPeerCertByName.trim()
+        verifyPeerCertByName: verifyPeerCertByName.trim(),
+        allowInsecure
       });
       onClose();
     } catch (err: unknown) {
@@ -513,6 +517,22 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
                         className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-3.5 py-2 text-sm text-white focus:outline-none focus:border-cyan-500 font-mono"
                       />
                     </div>
+                  </div>
+
+                  <div className="flex items-center justify-between p-3 rounded-xl bg-slate-900 border border-slate-700/80">
+                    <div>
+                      <div className="text-xs font-semibold text-slate-200">Insecure TLS (allowInsecure)</div>
+                      <div className="text-[11px] text-slate-400">Skip TLS certificate verification (useful for custom SNI/CDN fronts)</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAllowInsecure(!allowInsecure)}
+                      className={`w-11 h-6 flex items-center rounded-full p-1 transition-colors ${
+                        allowInsecure ? 'bg-cyan-600 justify-end' : 'bg-slate-700 justify-start'
+                      }`}
+                    >
+                      <div className="bg-white w-4 h-4 rounded-full shadow-md" />
+                    </button>
                   </div>
 
                   {protocol === 'vless' && network === 'tcp' && (

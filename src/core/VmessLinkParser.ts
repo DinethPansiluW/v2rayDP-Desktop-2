@@ -8,40 +8,43 @@ import { ServerProfile } from './types';
 export interface SingBoxConfigOptions {
   clashApiPort?: number;
   clashApiSecret?: string;
+  tunInterfaceName?: string;
+  bypassLan?: boolean;
   enableHotspot?: boolean;
   hotspotPort?: number;
   hotspotRequireAuth?: boolean;
   hotspotUsername?: string;
   hotspotPassword?: string;
-  bypassLan?: boolean;
   primaryDns?: string;
   secondaryDns?: string;
-  blockedDomains?: string[];
+  logLevel?: 'trace' | 'debug' | 'info' | 'warn' | 'warning' | 'error' | 'none';
   ruleSetPath?: string;
-  logLevel?: 'warning' | 'info' | 'debug' | 'error' | 'warn' | 'trace' | 'none';
-  tunInterfaceName?: string;
+  blockedDomains?: string[];
 }
 
 export class VmessLinkParser {
   /**
-   * Parses either a vless://, vmess://, or trojan:// link into a ServerProfile.
+   * Parses any supported share link (vless://, vmess://, trojan://)
    */
-  static parse(rawInput: string): ServerProfile {
-    const link = rawInput.trim();
-    if (link.toLowerCase().startsWith('vless://')) {
-      return this.parseVlessLink(link);
-    } else if (link.toLowerCase().startsWith('vmess://')) {
-      return this.parseVmessLink(link);
-    } else if (link.toLowerCase().startsWith('trojan://')) {
-      return this.parseTrojanLink(link);
-    } else {
-      throw new Error('Link must start with vless://, vmess://, or trojan://');
+  static parse(link: string): ServerProfile {
+    return this.parseShareLink(link);
+  }
+
+  static parseShareLink(link: string): ServerProfile {
+    const trimmed = link.trim();
+    if (trimmed.startsWith('vless://')) {
+      return this.parseVlessLink(trimmed);
+    } else if (trimmed.startsWith('vmess://')) {
+      return this.parseVmessLink(trimmed);
+    } else if (trimmed.startsWith('trojan://')) {
+      return this.parseTrojanLink(trimmed);
     }
+    throw new Error('Unsupported protocol: link must start with vless://, vmess://, or trojan://');
   }
 
   /**
-   * Standard VLESS URI format:
-   * vless://[uuid]@[host]:[port]?type=[network]&security=[security]&sni=[sni]&fp=[fp]&pbk=[pbk]&sid=[sid]&flow=[flow]&serviceName=[grpcService]#remarks
+   * VLESS URI format:
+   * vless://uuid@host:port?type=ws&security=tls&path=/...#remarks
    */
   static parseVlessLink(link: string): ServerProfile {
     const withoutScheme = link.substring(8).trim();
@@ -111,8 +114,11 @@ export class VmessLinkParser {
       }
     }
 
-    const networkRaw = queryMap['type'] || queryMap['net'] || 'tcp';
-    const network = networkRaw.toLowerCase().trim() as 'tcp' | 'ws' | 'grpc' | 'h2';
+    const networkRaw = (queryMap['type'] || queryMap['net'] || 'tcp').toLowerCase().trim();
+    if (networkRaw === 'xhttp' || networkRaw === 'splithttp' || networkRaw === 'kcp') {
+      throw new Error('Transport not supported by sing-box');
+    }
+    const network = networkRaw as 'tcp' | 'ws' | 'grpc' | 'h2';
 
     const securityRaw = (queryMap['security'] || 'none').toLowerCase().trim();
     const tls: 'none' | 'tls' | 'reality' =
@@ -132,6 +138,9 @@ export class VmessLinkParser {
     const headerType = queryMap['headerType'] || queryMap['headertype'] || 'none';
     const pinnedPeerCertSha256 = queryMap['pcs'] || '';
     const verifyPeerCertByName = queryMap['vcn'] || '';
+
+    const allowInsecureRaw = queryMap['allowinsecure'] || queryMap['insecure'];
+    const allowInsecure = allowInsecureRaw !== undefined ? allowInsecureRaw === '1' || allowInsecureRaw === 'true' : true;
 
     return {
       id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 12),
@@ -158,7 +167,7 @@ export class VmessLinkParser {
       grpcMode,
       pinnedPeerCertSha256,
       verifyPeerCertByName,
-      allowInsecure: true,
+      allowInsecure,
       pingLatencyMs: -1,
       createdAt: Date.now()
     };
@@ -234,8 +243,12 @@ export class VmessLinkParser {
       }
     }
 
-    const networkRaw = queryMap['type'] || queryMap['net'] || 'tcp';
-    const network = networkRaw.toLowerCase().trim() as 'tcp' | 'ws' | 'grpc' | 'h2';
+    const networkRaw = (queryMap['type'] || queryMap['net'] || 'tcp').toLowerCase().trim();
+    if (networkRaw === 'xhttp' || networkRaw === 'splithttp' || networkRaw === 'kcp') {
+      throw new Error('Transport not supported by sing-box');
+    }
+    const network = networkRaw as 'tcp' | 'ws' | 'grpc' | 'h2';
+
     const sni = queryMap['sni'] || queryMap['peer'] || '';
     const alpn = queryMap['alpn'] || '';
     const fingerprint = queryMap['fp'] || 'chrome';
@@ -243,6 +256,9 @@ export class VmessLinkParser {
     const path = queryMap['path'] || '/';
     const pinnedPeerCertSha256 = queryMap['pcs'] || '';
     const verifyPeerCertByName = queryMap['vcn'] || '';
+
+    const allowInsecureRaw = queryMap['allowinsecure'] || queryMap['insecure'];
+    const allowInsecure = allowInsecureRaw !== undefined ? allowInsecureRaw === '1' || allowInsecureRaw === 'true' : true;
 
     return {
       id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 12),
@@ -269,7 +285,7 @@ export class VmessLinkParser {
       grpcMode: 'gun',
       pinnedPeerCertSha256,
       verifyPeerCertByName,
-      allowInsecure: true,
+      allowInsecure,
       pingLatencyMs: -1,
       createdAt: Date.now()
     };
@@ -293,7 +309,13 @@ export class VmessLinkParser {
         const uuid = json.id || '';
         const alterId = parseInt(json.aid, 10) || 0;
         const security = json.scy || 'auto';
-        const network = (json.net || 'tcp').toLowerCase() as 'tcp' | 'ws' | 'grpc' | 'h2';
+
+        const netRaw = (json.net || 'tcp').toLowerCase().trim();
+        if (netRaw === 'xhttp' || netRaw === 'splithttp' || netRaw === 'kcp') {
+          throw new Error('Transport not supported by sing-box');
+        }
+        const network = netRaw as 'tcp' | 'ws' | 'grpc' | 'h2';
+
         const headerType = json.type || 'none';
         const host = json.host || '';
         let path = json.path || '/';
@@ -337,6 +359,9 @@ export class VmessLinkParser {
           createdAt: Date.now()
         };
       } catch (err) {
+        if ((err as Error)?.message?.includes('Transport not supported by sing-box')) {
+          throw err;
+        }
         // Fall back to URI parsing
       }
     }
@@ -370,11 +395,13 @@ export class VmessLinkParser {
 
     const queryParams = new URLSearchParams(queryPart);
     const remarks = queryParams.get('remarks') || 'VMess Server';
-    const network = (queryParams.get('obfs') || queryParams.get('net') || 'tcp').toLowerCase() as
-      | 'tcp'
-      | 'ws'
-      | 'grpc'
-      | 'h2';
+
+    const netRaw = (queryParams.get('obfs') || queryParams.get('net') || 'tcp').toLowerCase().trim();
+    if (netRaw === 'xhttp' || netRaw === 'splithttp' || netRaw === 'kcp') {
+      throw new Error('Transport not supported by sing-box');
+    }
+    const network = netRaw as 'tcp' | 'ws' | 'grpc' | 'h2';
+
     let path = queryParams.get('path') || '/';
     if (!path.startsWith('/')) {
       path = `/${path}`;
@@ -434,6 +461,7 @@ export class VmessLinkParser {
     if (profile.sni) link += `&sni=${encodeURIComponent(profile.sni)}`;
     if (profile.fingerprint) link += `&fp=${encodeURIComponent(profile.fingerprint)}`;
     if (profile.alpn) link += `&alpn=${encodeURIComponent(profile.alpn)}`;
+    if (profile.allowInsecure === false) link += `&insecure=0`;
     if (profile.network === 'ws') {
       link += `&path=${encodeURIComponent(profile.path || '/')}`;
       if (profile.host) link += `&host=${encodeURIComponent(profile.host)}`;
@@ -448,55 +476,143 @@ export class VmessLinkParser {
     const sec = profile.tls === 'reality' ? 'reality' : (profile.tls === 'tls' ? 'tls' : 'none');
 
     let link = `vless://${profile.uuid}@${profile.address}:${profile.port}?type=${profile.network}&security=${sec}&path=${encodedPath}`;
-    if (profile.host) link += `&host=${encodeURIComponent(profile.host)}`;
+
     if (profile.sni) link += `&sni=${encodeURIComponent(profile.sni)}`;
+    if (profile.fingerprint) link += `&fp=${encodeURIComponent(profile.fingerprint)}`;
     if (profile.alpn) link += `&alpn=${encodeURIComponent(profile.alpn)}`;
-    if (profile.flow && (profile.network === 'tcp' || (profile.network as string) === 'raw')) {
-      link += `&flow=${encodeURIComponent(profile.flow)}`;
+    if (profile.flow) link += `&flow=${encodeURIComponent(profile.flow)}`;
+    if (profile.allowInsecure === false) link += `&insecure=0`;
+
+    if (sec === 'reality') {
+      if (profile.publicKey) link += `&pbk=${encodeURIComponent(profile.publicKey)}`;
+      if (profile.shortId) link += `&sid=${encodeURIComponent(profile.shortId)}`;
+      if (profile.spiderX) link += `&spx=${encodeURIComponent(profile.spiderX)}`;
     }
-    if (profile.tls === 'reality') {
-      link += `&pbk=${encodeURIComponent(profile.publicKey)}&sid=${encodeURIComponent(profile.shortId)}&fp=${encodeURIComponent(profile.fingerprint || 'chrome')}&spx=${encodeURIComponent(profile.spiderX || '/')}`;
+
+    if (profile.network === 'ws' && profile.host) {
+      link += `&host=${encodeURIComponent(profile.host)}`;
+    } else if (profile.network === 'grpc' && profile.serviceName) {
+      link += `&serviceName=${encodeURIComponent(profile.serviceName)}`;
     }
-    if (profile.network === 'grpc') {
-      link += `&serviceName=${encodeURIComponent(profile.serviceName)}&mode=${profile.grpcMode || 'gun'}`;
-    }
+
     link += `#${encodedName}`;
     return link;
   }
 
   static toVmessLink(profile: ServerProfile): string {
-    const json: Record<string, string> = {
+    const json = {
       v: '2',
-      ps: profile.name,
+      ps: profile.name || 'VMess Node',
       add: profile.address,
-      port: String(profile.port),
+      port: profile.port,
       id: profile.uuid,
-      aid: String(profile.alterId || 0),
+      aid: profile.alterId || 0,
       scy: profile.security || 'auto',
       net: profile.network || 'tcp',
       type: profile.headerType || 'none',
       host: profile.host || '',
       path: profile.path || '/',
       tls: profile.tls === 'tls' ? 'tls' : '',
-      sni: profile.sni || profile.host || '',
-      alpn: profile.alpn || ''
+      sni: profile.sni || '',
+      alpn: profile.alpn || '',
+      fp: profile.fingerprint || ''
     };
-    if (profile.fingerprint) json.fp = profile.fingerprint;
 
-    const jsonStr = JSON.stringify(json);
-    const base64 =
-      typeof Buffer !== 'undefined'
-        ? Buffer.from(jsonStr, 'utf8').toString('base64')
-        : btoa(unescape(encodeURIComponent(jsonStr)));
+    const raw = JSON.stringify(json, null, 2);
+    let base64 = '';
+    if (typeof Buffer !== 'undefined') {
+      base64 = Buffer.from(raw).toString('base64');
+    } else {
+      base64 = btoa(unescape(encodeURIComponent(raw)));
+    }
+
     return `vmess://${base64}`;
   }
 
   /**
-   * Generates a modern, strictly compliant sing-box 1.13+ configuration.
-   * Full-device TUN VPN mode with Wintun, typed DNS, clash_api, reject action, and auto_detect_interface.
+   * Helper to parse DNS server address from settings into typed format
+   * (1.1.1.1, tcp://..., udp://..., tls://..., https://host/path, optional :port)
+   * A bare IP means udp.
+   */
+  private static parseDnsServer(rawDns: string, tag: string, detour: string): Record<string, unknown> {
+    const raw = (rawDns || '').trim();
+    if (!raw) {
+      return {
+        type: 'udp',
+        tag,
+        server: '1.1.1.1',
+        detour
+      };
+    }
+
+    let scheme = '';
+    let rest = raw;
+    if (raw.includes('://')) {
+      const idx = raw.indexOf('://');
+      scheme = raw.substring(0, idx).toLowerCase();
+      rest = raw.substring(idx + 3);
+    }
+
+    // A bare IP or host means udp
+    let type = scheme || 'udp';
+    if (type === 'doh') type = 'https';
+    if (type === 'dot') type = 'tls';
+
+    let path: string | undefined;
+    if (rest.includes('/')) {
+      const slashIdx = rest.indexOf('/');
+      path = rest.substring(slashIdx);
+      rest = rest.substring(0, slashIdx);
+    }
+
+    let server = rest;
+    let serverPort: number | undefined;
+
+    if (server.startsWith('[') && server.includes(']')) {
+      const closeBracket = server.indexOf(']');
+      const after = server.substring(closeBracket + 1);
+      server = server.substring(1, closeBracket);
+      if (after.startsWith(':')) {
+        const p = parseInt(after.substring(1), 10);
+        if (!isNaN(p)) serverPort = p;
+      }
+    } else if (server.includes(':')) {
+      const colonCount = (server.match(/:/g) || []).length;
+      if (colonCount === 1) {
+        const [h, pStr] = server.split(':');
+        server = h;
+        const p = parseInt(pStr, 10);
+        if (!isNaN(p)) serverPort = p;
+      }
+    }
+
+    const obj: Record<string, unknown> = {
+      type,
+      tag,
+      server,
+      detour
+    };
+    if (serverPort !== undefined) {
+      obj.server_port = serverPort;
+    }
+    if (path) {
+      obj.path = path;
+    }
+    return obj;
+  }
+
+  /**
+   * Generates a fully compliant sing-box 1.13+ config JSON
+   * Strict adherence to sing-box 1.13 TUN VPN specifications:
+   * - Typed DNS server format (no legacy DNS syntax)
+   * - No deprecated inbound fields (no `sniff: true` in tun or mixed inbounds)
+   * - packet_encoding only on vmess/vless (not trojan)
+   * - Reality requires utls with chrome default
+   * - Respects profile.allowInsecure !== false
+   * - default_domain_resolver: 'dns-direct'
    */
   static toSingBoxConfigJson(profile: ServerProfile, options: SingBoxConfigOptions = {}): string {
-    const tunInterface = options.tunInterfaceName || 'v2raydp-tun';
+    const tunInterface = options.tunInterfaceName || 'v2rayDP-TUN';
     const bypassLan = options.bypassLan !== false;
     const primaryDns = options.primaryDns || '1.1.1.1';
     const secondaryDns = options.secondaryDns || '8.8.8.8';
@@ -509,6 +625,7 @@ export class VmessLinkParser {
     else if (options.logLevel === 'error') lvl = 'error';
     else if (options.logLevel === 'trace') lvl = 'trace';
     else if (options.logLevel === 'none') lvl = 'panic';
+    else if (options.logLevel === 'warn' || options.logLevel === 'warning') lvl = 'warn';
 
     const log = {
       disabled: options.logLevel === 'none',
@@ -517,7 +634,7 @@ export class VmessLinkParser {
     };
 
     // 2. Inbounds
-    // tun inbound: 172.19.0.1/30 and IPv6 address, auto_route true, strict_route true, stack "mixed"
+    // tun inbound: strict_route true, auto_route true, stack "mixed", no sniff field
     const inbounds: Record<string, unknown>[] = [
       {
         type: 'tun',
@@ -526,19 +643,17 @@ export class VmessLinkParser {
         address: ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
         auto_route: true,
         strict_route: true,
-        stack: 'mixed',
-        sniff: true
+        stack: 'mixed'
       }
     ];
 
-    // Optional Hotspot mixed inbound (SOCKS5 + HTTP) on 0.0.0.0
+    // Optional Hotspot mixed inbound (SOCKS5 + HTTP) on 0.0.0.0 (no sniff field)
     if (options.enableHotspot) {
       const hotspotInbound: Record<string, unknown> = {
         type: 'mixed',
         tag: 'mixed-hotspot-in',
         listen: '0.0.0.0',
-        listen_port: options.hotspotPort || 10808,
-        sniff: true
+        listen_port: options.hotspotPort || 10808
       };
       if (options.hotspotRequireAuth && options.hotspotUsername) {
         hotspotInbound.users = [
@@ -562,9 +677,13 @@ export class VmessLinkParser {
       tag: 'proxy',
       server: profile.address,
       server_port: profile.port,
-      domain_resolver: 'dns-direct',
-      packet_encoding: 'xudp'
+      domain_resolver: 'dns-direct'
     };
+
+    // packet_encoding is only valid for VMess and VLESS (never for Trojan)
+    if (!isTrojan) {
+      proxyOutbound.packet_encoding = 'xudp';
+    }
 
     if (isTrojan) {
       proxyOutbound.password = profile.uuid;
@@ -579,12 +698,12 @@ export class VmessLinkParser {
       proxyOutbound.alter_id = profile.alterId || 0;
     }
 
-    // TLS Settings with insecure: true ALWAYS
+    // TLS Settings
     if (isTls) {
       const tlsSettings: Record<string, unknown> = {
         enabled: true,
         server_name: profile.sni || profile.address,
-        insecure: true // User requirement: "TLS with insecure:true ALWAYS (allowInsecure stays enabled, same as before)"
+        insecure: profile.allowInsecure !== false
       };
 
       if (profile.alpn) {
@@ -594,18 +713,20 @@ export class VmessLinkParser {
           .filter(Boolean);
       }
 
-      if (profile.fingerprint) {
+      if (isReality) {
         tlsSettings.utls = {
           enabled: true,
-          fingerprint: profile.fingerprint
+          fingerprint: profile.fingerprint || 'chrome'
         };
-      }
-
-      if (isReality) {
         tlsSettings.reality = {
           enabled: true,
           public_key: profile.publicKey,
           short_id: profile.shortId || ''
+        };
+      } else if (profile.fingerprint) {
+        tlsSettings.utls = {
+          enabled: true,
+          fingerprint: profile.fingerprint
         };
       }
 
@@ -662,50 +783,23 @@ export class VmessLinkParser {
       }
     ];
 
-    // 4. DNS: primary/secondary from Settings resolved through proxy; direct resolver only for proxy server domain
-    const formatDnsAddr = (addr: string) => {
-      if (
-        addr.startsWith('tcp://') ||
-        addr.startsWith('udp://') ||
-        addr.startsWith('https://') ||
-        addr.startsWith('tls://') ||
-        addr === 'local'
-      ) {
-        return addr;
-      }
-      return `tcp://${addr}`;
-    };
-
+    // 4. DNS: typed format (no legacy DNS syntax)
     const isIpAddress = /^(\d{1,3}\.){3}\d{1,3}$|^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$/.test(profile.address);
 
     const dnsServers: Record<string, unknown>[] = [
+      this.parseDnsServer(primaryDns, 'dns-remote-pri', 'proxy'),
+      this.parseDnsServer(secondaryDns, 'dns-remote-sec', 'proxy'),
       {
-        tag: 'dns-remote-pri',
-        address: formatDnsAddr(primaryDns),
-        detour: 'proxy'
-      },
-      {
-        tag: 'dns-remote-sec',
-        address: formatDnsAddr(secondaryDns),
-        detour: 'proxy'
-      },
-      {
-        tag: 'dns-direct',
-        address: 'local',
-        detour: 'direct'
+        type: 'local',
+        tag: 'dns-direct'
       }
     ];
 
-    const dnsRules: Record<string, unknown>[] = [
-      {
-        outbound: 'direct',
-        server: 'dns-direct'
-      }
-    ];
-
+    const dnsRules: Record<string, unknown>[] = [];
     if (!isIpAddress && profile.address) {
-      dnsRules.unshift({
+      dnsRules.push({
         domain: [profile.address],
+        action: 'route',
         server: 'dns-direct'
       });
     }
@@ -718,7 +812,11 @@ export class VmessLinkParser {
     };
 
     // 5. Route Rules in required order:
-    // sniff, hijack-dns for protocol dns, private/LAN IPs -> direct, ad-block rule -> reject, proxy server address -> direct
+    // 1) sniff
+    // 2) hijack-dns for protocol dns
+    // 3) private/LAN IPs -> direct (controlled by bypass LAN setting)
+    // 4) ad-block rule -> reject
+    // 5) the proxy server address -> direct
     const routeRules: Record<string, unknown>[] = [];
 
     // 1) sniff
@@ -779,6 +877,7 @@ export class VmessLinkParser {
 
     const route: Record<string, unknown> = {
       auto_detect_interface: true,
+      default_domain_resolver: 'dns-direct',
       final: 'proxy',
       rules: routeRules
     };

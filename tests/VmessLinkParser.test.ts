@@ -277,4 +277,73 @@ describe('VmessLinkParser & sing-box 1.13 Configuration', () => {
     expect(mixed.listen_port).toBe(10810);
     expect(mixed.users).toEqual([{ username: 'hotspotUser', password: 'secretPassword' }]);
   });
+
+  // 9. Typed DNS format (no legacy DNS format, route default_domain_resolver)
+  it('should generate typed DNS format and not emit sniff: true on inbounds', () => {
+    const profile = VmessLinkParser.parse(
+      'vless://b831381d-6324-4d53-ad4f-8cda48b30811@node.example.com:443?type=tcp&security=tls#DNS-Node'
+    );
+
+    const config = JSON.parse(
+      VmessLinkParser.toSingBoxConfigJson(profile, {
+        primaryDns: 'tcp://1.1.1.1:5353',
+        secondaryDns: '8.8.8.8'
+      })
+    );
+
+    // Inbounds should NOT have sniff field
+    expect(config.inbounds[0].sniff).toBeUndefined();
+
+    // DNS servers should use typed objects
+    expect(config.dns.servers).toEqual([
+      { type: 'tcp', tag: 'dns-remote-pri', server: '1.1.1.1', server_port: 5353, detour: 'proxy' },
+      { type: 'udp', tag: 'dns-remote-sec', server: '8.8.8.8', detour: 'proxy' },
+      { type: 'local', tag: 'dns-direct' }
+    ]);
+    expect(config.dns.rules).toEqual([
+      { domain: ['node.example.com'], action: 'route', server: 'dns-direct' }
+    ]);
+    expect(config.route.default_domain_resolver).toBe('dns-direct');
+  });
+
+  // 10. Trojan outbound should not have packet_encoding: xudp
+  it('should not emit packet_encoding on Trojan outbounds', () => {
+    const profile = VmessLinkParser.parse(
+      'trojan://my-trojan-password@node.example.com:443?security=tls&type=tcp#Trojan-Node'
+    );
+
+    const config = JSON.parse(VmessLinkParser.toSingBoxConfigJson(profile));
+    const proxy = config.outbounds.find((o: any) => o.tag === 'proxy');
+    expect(proxy.type).toBe('trojan');
+    expect(proxy.password).toBe('my-trojan-password');
+    expect(proxy.packet_encoding).toBeUndefined();
+  });
+
+  // 11. allowInsecure false should set tls.insecure to false
+  it('should respect allowInsecure false', () => {
+    const profile = VmessLinkParser.parse(
+      'vless://b831381d-6324-4d53-ad4f-8cda48b30811@node.example.com:443?type=tcp&security=tls&insecure=0#Strict-TLS-Node'
+    );
+    expect(profile.allowInsecure).toBe(false);
+
+    const config = JSON.parse(VmessLinkParser.toSingBoxConfigJson(profile));
+    const proxy = config.outbounds.find((o: any) => o.tag === 'proxy');
+    expect(proxy.tls.insecure).toBe(false);
+  });
+
+  // 12. Reject unsupported transports (xhttp, splithttp, kcp)
+  it('should fail with clear error when unsupported transports (xhttp, splithttp, kcp) are imported', () => {
+    expect(() =>
+      VmessLinkParser.parse('vless://b831381d-6324-4d53-ad4f-8cda48b30811@node.example.com:443?type=xhttp&security=tls')
+    ).toThrow('Transport not supported by sing-box');
+
+    expect(() =>
+      VmessLinkParser.parse('vless://b831381d-6324-4d53-ad4f-8cda48b30811@node.example.com:443?type=splithttp&security=tls')
+    ).toThrow('Transport not supported by sing-box');
+
+    expect(() =>
+      VmessLinkParser.parse('vless://b831381d-6324-4d53-ad4f-8cda48b30811@node.example.com:443?type=kcp&security=none')
+    ).toThrow('Transport not supported by sing-box');
+  });
 });
+
