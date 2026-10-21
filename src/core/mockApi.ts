@@ -451,31 +451,63 @@ export function initMockApi(): ApiInterface {
       return duplicated;
     },
 
-    importProfilesFromText: async (text) => {
-      const lines = text.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
+    importProfilesFromText: async (rawText) => {
+      let text = (rawText || '')
+        .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n');
+
+      const trimmed = text.trim();
+      if (
+        !trimmed.includes('://') &&
+        trimmed.length > 20 &&
+        /^[A-Za-z0-9+/=]+$/.test(trimmed.replace(/\s+/g, ''))
+      ) {
+        try {
+          const decoded = atob(trimmed.replace(/\s+/g, ''));
+          if (decoded.includes('://')) {
+            text = decoded;
+          }
+        } catch {}
+      }
+
+      const linkRegex = /(?:vless|vmess|trojan):\/\/[^\s"'<>]+/gi;
+      const matches = text.match(linkRegex) || [];
       const profiles = await mockApi.getProfiles();
       let added = 0;
+      let skipped = 0;
       const errors: string[] = [];
 
-      for (const line of lines) {
+      for (const link of matches) {
         try {
-          const lower = line.toLowerCase();
-          if (lower.startsWith('vless://') || lower.startsWith('vmess://') || lower.startsWith('trojan://')) {
-            const parsed = VmessLinkParser.parse(line);
-            parsed.isSelected = profiles.length === 0;
-            profiles.push(parsed);
-            added++;
+          const parsed = VmessLinkParser.parse(link);
+          const isDuplicate = profiles.some(
+            (p) =>
+              p.address === parsed.address &&
+              p.port === parsed.port &&
+              ((parsed.uuid && p.uuid === parsed.uuid) || (parsed.password && p.password === parsed.password))
+          );
+
+          if (isDuplicate) {
+            skipped++;
+            continue;
           }
+
+          parsed.isSelected = profiles.length === 0;
+          profiles.push(parsed);
+          added++;
+          addLog('INFO', 'app', `Imported profile: ${parsed.name}`);
         } catch (err: unknown) {
-          errors.push(`Failed to parse link: ${(err as Error).message}`);
+          const msg = (err as Error)?.message || 'Failed to parse link';
+          errors.push(msg);
+          addLog('WARN', 'app', `Import failed: ${msg}`);
         }
       }
 
       if (added > 0) {
         localStorage.setItem(STORAGE_KEYS.PROFILES, JSON.stringify(profiles));
-        addLog('INFO', 'Import', `Imported ${added} profile${added > 1 ? 's' : ''} from text`);
       }
-      return { added, errors };
+      return { added, errors, skipped };
     },
 
     exportProfilesJson: async () => {

@@ -9,6 +9,8 @@ export interface SingBoxConfigOptions {
   clashApiPort?: number;
   clashApiSecret?: string;
   tunInterfaceName?: string;
+  tunStack?: 'mixed' | 'gvisor' | 'system';
+  strictRoute?: boolean;
   bypassLan?: boolean;
   enableHotspot?: boolean;
   hotspotPort?: number;
@@ -637,7 +639,10 @@ export class VmessLinkParser {
     };
 
     // 2. Inbounds
-    // tun inbound: strict_route true, auto_route true, stack "mixed", no sniff field
+    const tunStack = options.tunStack || 'mixed';
+    const strictRoute = options.strictRoute !== false;
+
+    // tun inbound: strict_route, auto_route true, stack, no sniff field
     const inbounds: Record<string, unknown>[] = [
       {
         type: 'tun',
@@ -645,8 +650,8 @@ export class VmessLinkParser {
         interface_name: tunInterface,
         address: ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
         auto_route: true,
-        strict_route: true,
-        stack: 'mixed'
+        strict_route: strictRoute,
+        stack: tunStack
       }
     ];
 

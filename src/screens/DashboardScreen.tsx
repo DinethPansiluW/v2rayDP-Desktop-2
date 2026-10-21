@@ -37,7 +37,7 @@ interface DashboardScreenProps {
   profiles: ServerProfile[];
   logs: AppLog[];
   onStartVpn: (profileId?: string) => Promise<boolean>;
-  onStopVpn: () => Promise<boolean>;
+  onStopVpn: (reason?: string) => Promise<boolean>;
   onSelectProfile: (profileId: string) => Promise<boolean>;
   onSaveProfile: (profile: Partial<ServerProfile>) => Promise<void>;
   onDeleteProfile: (profileId: string) => Promise<boolean>;
@@ -118,37 +118,9 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     }, 2500);
   };
 
-  // 1-Click Clipboard Import (no dialogs, immediate toast)
+  // 1-Click Clipboard Import (delegates to App-level onImportClipboard for full reload + auto-select)
   const handleOneClickClipboardImport = async () => {
-    try {
-      let clipboardText = '';
-      if (window.api?.readClipboardText) {
-        clipboardText = await window.api.readClipboardText();
-      } else if (navigator.clipboard?.readText) {
-        clipboardText = await navigator.clipboard.readText();
-      }
-
-      if (!clipboardText || !clipboardText.trim()) {
-        showToast('Clipboard is empty');
-        return;
-      }
-
-      if (window.api?.importProfilesFromText) {
-        const res = await window.api.importProfilesFromText(clipboardText);
-        if (res.added > 0) {
-          showToast(`${res.added} profile${res.added > 1 ? 's' : ''} imported`);
-        } else if (res.errors && res.errors.length > 0) {
-          showToast(`Import failed: ${res.errors[0]}`);
-        } else {
-          showToast('No valid vless://, vmess://, or trojan:// links found');
-        }
-      } else {
-        await onImportClipboard();
-        showToast('Clipboard imported');
-      }
-    } catch (err: unknown) {
-      showToast(`Import error: ${(err as Error).message}`);
-    }
+    await onImportClipboard();
   };
 
   const handleCardClick = async (profile: ServerProfile) => {
@@ -276,7 +248,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   });
 
   return (
-    <div className="relative flex flex-col h-full max-w-5xl mx-auto space-y-4 pb-20 select-none">
+    <div className="relative flex flex-col h-full max-w-3xl mx-auto space-y-4 pb-20 select-none">
       {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed top-5 right-6 z-50 flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-slate-900 border border-cyan-500/50 text-cyan-300 text-xs font-semibold shadow-2xl shadow-cyan-500/20 animate-fade-in">
@@ -449,10 +421,18 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
 
       {/* Error Banner */}
       {isError && connectionState.errorMessage && (
-        <div className="flex items-start space-x-3 p-3.5 bg-red-950/80 border border-red-500/50 rounded-2xl text-xs text-red-200 shadow-lg animate-fade-in">
-          <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-          <div className="flex-1 overflow-x-auto whitespace-pre-wrap font-mono text-[11px]">
-            {connectionState.errorMessage}
+        <div className="flex flex-col space-y-1.5 p-3.5 bg-red-950/80 border border-red-500/50 rounded-2xl text-xs text-red-200 shadow-lg animate-fade-in">
+          <div className="flex items-start space-x-3">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <div className="flex-1 overflow-x-auto whitespace-pre-wrap font-mono text-[11px]">
+              {connectionState.errorMessage}
+            </div>
+          </div>
+          <div className="text-[11px] text-amber-300/90 pl-7 flex items-center space-x-1.5 font-medium">
+            <span className="font-bold uppercase tracking-wider text-[10px] bg-amber-950/90 border border-amber-500/40 px-1.5 py-0.5 rounded text-amber-300">
+              Hint
+            </span>
+            <span>Run as Administrator, close other VPN apps, then try again.</span>
           </div>
         </div>
       )}
@@ -708,10 +688,17 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             </div>
           </button>
         ) : isConnecting ? (
-          <div className="flex items-center space-x-2.5 px-6 py-3.5 rounded-full bg-amber-600 text-white shadow-2xl shadow-amber-600/40 font-bold text-sm border border-amber-400/30 animate-pulse">
-            <RefreshCw className="w-4 h-4 animate-spin" />
-            <span>Connecting...</span>
-          </div>
+          <button
+            onClick={() => onStopVpn('Cancelled by user')}
+            title="Click to cancel connection"
+            className="group flex items-center space-x-2.5 px-6 py-3.5 rounded-full bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 text-white shadow-2xl shadow-amber-600/40 font-bold text-xs border border-amber-400/30 transition-all transform hover:scale-105 active:scale-95"
+          >
+            <RefreshCw className="w-4 h-4 animate-spin shrink-0 text-amber-200" />
+            <span className="font-semibold">{connectionState.reason || 'Connecting... (attempt 1/3)'}</span>
+            <span className="text-[10px] bg-black/40 hover:bg-black/60 px-2 py-0.5 rounded-full text-amber-200 uppercase font-mono font-bold tracking-wider ml-1">
+              Cancel
+            </span>
+          </button>
         ) : (
           <button
             onClick={() => onStartVpn()}

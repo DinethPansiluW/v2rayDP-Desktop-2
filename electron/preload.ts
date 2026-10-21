@@ -95,7 +95,16 @@ contextBridge.exposeInMainWorld('api', {
   checkAdminElevation: () => ipcRenderer.invoke('check-admin-elevation'),
   restartAsAdmin: () => ipcRenderer.invoke('restart-as-admin'),
   readClipboardText: async () => {
-    return clipboard.readText();
+    try {
+      const text = await ipcRenderer.invoke('read-clipboard-text');
+      if (typeof text === 'string') return text;
+    } catch {}
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+        return await navigator.clipboard.readText();
+      }
+    } catch {}
+    return '';
   },
 
   // Helpers

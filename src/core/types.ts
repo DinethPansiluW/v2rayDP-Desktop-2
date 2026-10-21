@@ -10,6 +10,7 @@ export interface ServerProfile {
   address: string;
   port: number;
   uuid: string;
+  password?: string; // for Trojan profiles or alternative credentials
   alterId: number; // 0 for VLESS, 0 or configured for VMess
   security: string; // "auto", "none", "aes-128-gcm", "chacha20-poly1305"
   network: 'tcp' | 'ws' | 'grpc' | 'h2';
@@ -184,9 +185,9 @@ export interface ApiInterface {
   deleteProfile: (id: string) => Promise<boolean>;
   selectProfile: (id: string) => Promise<boolean>;
   duplicateProfile: (id: string) => Promise<ServerProfile>;
-  importProfilesFromText: (text: string) => Promise<{ added: number; errors: string[] }>;
+  importProfilesFromText: (text: string) => Promise<{ added: number; errors: string[]; skipped?: number }>;
   exportProfilesJson: () => Promise<string>;
-  importProfilesJson: (jsonString: string) => Promise<{ added: number; errors: string[] }>;
+  importProfilesJson: (jsonString: string) => Promise<{ added: number; errors: string[]; skipped?: number }>;
 
   // VPN Connection
   startVpn: (profileId?: string) => Promise<boolean>;

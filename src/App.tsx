@@ -288,7 +288,7 @@ export default function App() {
       } else if (navigator.clipboard) {
         text = await navigator.clipboard.readText();
       }
-      if (!text) {
+      if (!text || !text.trim()) {
         showToast('Clipboard is empty', 'error');
         return;
       }
@@ -296,11 +296,26 @@ export default function App() {
       if (res.added > 0) {
         const updated = await window.api.getProfiles();
         setProfiles(updated);
-        showToast(`Imported ${res.added} profile${res.added > 1 ? 's' : ''}`, 'success');
-      } else if (res.errors.length > 0) {
-        showToast(`Import error: ${res.errors[0]}`, 'error');
+        // Auto-select the new profile if it is the only one or none selected
+        if (updated.length === 1 || !updated.some((p) => p.isSelected)) {
+          const toSelect = updated[updated.length - 1];
+          if (toSelect) {
+            await window.api.selectProfile(toSelect.id);
+            const reloaded = await window.api.getProfiles();
+            setProfiles(reloaded);
+          }
+        }
+        if (res.skipped && res.skipped > 0) {
+          showToast(`${res.added} profile${res.added > 1 ? 's' : ''} imported, ${res.skipped} already exists`, 'success');
+        } else {
+          showToast(`${res.added} profile${res.added > 1 ? 's' : ''} imported`, 'success');
+        }
+      } else if (res.skipped && res.skipped > 0) {
+        showToast(`${res.skipped} profile${res.skipped > 1 ? 's' : ''} already exists`, 'info');
+      } else if (res.errors?.length) {
+        showToast(res.errors[0], 'error');
       } else {
-        showToast('No valid link found', 'error');
+        showToast('No valid vless://, vmess:// or trojan:// link found in clipboard', 'error');
       }
     } catch (err: unknown) {
       showToast((err as Error).message, 'error');
@@ -314,9 +329,25 @@ export default function App() {
       if (res.added > 0) {
         const updated = await window.api.getProfiles();
         setProfiles(updated);
-        showToast(`Imported ${res.added} profile${res.added > 1 ? 's' : ''}`, 'success');
+        if (updated.length === 1 || !updated.some((p) => p.isSelected)) {
+          const toSelect = updated[updated.length - 1];
+          if (toSelect) {
+            await window.api.selectProfile(toSelect.id);
+            const reloaded = await window.api.getProfiles();
+            setProfiles(reloaded);
+          }
+        }
+        if (res.skipped && res.skipped > 0) {
+          showToast(`${res.added} profile${res.added > 1 ? 's' : ''} imported, ${res.skipped} already exists`, 'success');
+        } else {
+          showToast(`${res.added} profile${res.added > 1 ? 's' : ''} imported`, 'success');
+        }
+      } else if (res.skipped && res.skipped > 0) {
+        showToast(`${res.skipped} profile${res.skipped > 1 ? 's' : ''} already exists`, 'info');
+      } else if (res.errors?.length) {
+        showToast(res.errors[0], 'error');
       } else {
-        showToast('No valid profiles found in file', 'error');
+        showToast('No valid vless://, vmess:// or trojan:// link found in file', 'error');
       }
     } catch (err: unknown) {
       showToast((err as Error).message, 'error');
@@ -369,7 +400,7 @@ export default function App() {
           </div>
         )}
 
-        <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6">
+        <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6">
           {(activeTab === 'home' || (activeTab as string) === 'dashboard') && (
             <DashboardScreen
               connectionState={connectionState}

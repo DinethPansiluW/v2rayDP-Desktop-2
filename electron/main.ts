@@ -14,7 +14,7 @@
  * - Elevated Windows Task Scheduler for Start-with-Windows
  */
 
-import { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, Notification } from 'electron';
+import { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, Notification, clipboard } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -335,27 +335,19 @@ function cleanupStaleTunAndRoutes(): Promise<void> {
 }
 
 /**
- * Wait until Wintun adapter is Up in Windows, then set metric to 1
+ * Fast Wintun adapter Up check via single netsh call (runs in background after clash_api is ready)
  */
-async function waitForTunAdapterUp(interfaceName = 'v2raydp-tun', timeoutMs = 10000): Promise<boolean> {
+async function waitForTunAdapterUp(interfaceName = 'v2raydp-tun', timeoutMs = 8000): Promise<boolean> {
   if (process.platform !== 'win32') return true;
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
     const isUp = await new Promise<boolean>((res) => {
       exec(`netsh interface show interface name="${interfaceName}"`, (err, stdout) => {
-        if (!err && stdout && (stdout.includes('Connected') || stdout.includes('Up'))) {
+        if (!err && stdout && (stdout.includes('Connected') || stdout.includes('Up') || stdout.includes('Enabled'))) {
           return res(true);
         }
-        exec(
-          `powershell -NoProfile -Command "(Get-NetAdapter -Name '${interfaceName}' -ErrorAction SilentlyContinue).Status"`,
-          (psErr, psOut) => {
-            if (!psErr && psOut && psOut.trim().toLowerCase() === 'up') {
-              return res(true);
-            }
-            res(false);
-          }
-        );
+        res(false);
       });
     });
 
@@ -364,10 +356,10 @@ async function waitForTunAdapterUp(interfaceName = 'v2raydp-tun', timeoutMs = 10
       addLog('INFO', 'TUN', `Wintun adapter "${interfaceName}" verified Up and metric set to 1.`);
       return true;
     }
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 300));
   }
 
-  addLog('ERROR', 'TUN', `Timed out waiting for virtual network adapter "${interfaceName}" to reach Up state (10s).`);
+  addLog('WARN', 'TUN', `Wintun adapter "${interfaceName}" did not indicate Up within ${timeoutMs / 1000}s. Traffic will continue routing.`);
   return false;
 }
 
@@ -588,9 +580,14 @@ function checkSingBoxConfig(binaryPath: string, configPath: string): Promise<{ o
 }
 
 /**
- * Waits for clash_api /version to respond with 200 OK
+ * Waits for clash_api /version (up to 30s) or detects "sing-box started" on stdout/stderr
  */
-function waitForClashApiReady(port: number, child: ChildProcess, timeoutMs = 10000): Promise<boolean> {
+function waitForClashApiOrStarted(
+  port: number,
+  child: ChildProcess,
+  timeoutMs = 30000,
+  checkStartedLine: () => boolean
+): Promise<boolean> {
   const start = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
@@ -617,6 +614,12 @@ function waitForClashApiReady(port: number, child: ChildProcess, timeoutMs = 100
         return resolve(false);
       }
 
+      if (checkStartedLine()) {
+        resolved = true;
+        cleanup();
+        return resolve(true);
+      }
+
       if (Date.now() - start >= timeoutMs) {
         resolved = true;
         cleanup();
@@ -625,7 +628,7 @@ function waitForClashApiReady(port: number, child: ChildProcess, timeoutMs = 100
 
       try {
         const res = await fetch(`http://127.0.0.1:${port}/version`, {
-          signal: AbortSignal.timeout(500)
+          signal: AbortSignal.timeout(400)
         });
         if (res.ok) {
           resolved = true;
@@ -635,7 +638,7 @@ function waitForClashApiReady(port: number, child: ChildProcess, timeoutMs = 100
       } catch {}
 
       if (!resolved) {
-        timer = setTimeout(check, 150);
+        timer = setTimeout(check, 250);
       }
     };
 
@@ -644,8 +647,23 @@ function waitForClashApiReady(port: number, child: ChildProcess, timeoutMs = 100
 }
 
 async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
+  // Pre-connection status: connecting
+  currentConnectionState = {
+    status: 'connecting',
+    reason: 'Connecting... (attempt 1/3)',
+    profileName: profile.name,
+    activeProfile: profile,
+    connectedAt: Date.now(),
+    virtualAdapterName: 'v2raydp-tun'
+  };
+  mainWindow?.webContents.send('on-state-change', currentConnectionState);
+  updateTrayMenu();
+
+  // 3) Clean start before first spawn
   await stopCurrentSingBoxProcess();
+  await killStaleProcesses();
   await cleanupStaleTunAndRoutes();
+  await new Promise((r) => setTimeout(r, 800));
   stopTrafficMonitor();
 
   const binaryPath = getSingBoxExecutablePath();
@@ -685,19 +703,7 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     return false;
   }
 
-  // Pre-connection status: connecting
-  currentConnectionState = {
-    status: 'connecting',
-    reason: `Connecting to ${profile.name}...`,
-    profileName: profile.name,
-    activeProfile: profile,
-    connectedAt: Date.now(),
-    virtualAdapterName: 'v2raydp-tun'
-  };
-  mainWindow?.webContents.send('on-state-change', currentConnectionState);
-  updateTrayMenu();
-
-  // Fast preflight server connectivity check (treats TLS error as reachable; warn only, do not block)
+  // Fast preflight server connectivity check (warn only, do not block)
   addLog('INFO', 'sing-box', `Checking remote server availability: ${profile.address}:${profile.port}...`);
   const preflight = await fastNodeCheck(profile.address, profile.port, profile.tls, profile.sni, 2500);
   if (!preflight.ok) {
@@ -710,51 +716,80 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
   const activeBlockedDomains = getActiveBlockedDomains();
   const ruleSetPath = await prepareAdblockRuleSet(binaryPath, activeBlockedDomains);
 
-  // Allocate free random port for clash_api
-  currentClashApiPort = await getFreeRandomPort();
+  // 2) Auto-retry up to 3 attempts
+  const attempts: Array<{ attempt: number; stack: 'mixed' | 'gvisor'; strictRoute: boolean }> = [
+    { attempt: 1, stack: 'mixed', strictRoute: true },
+    { attempt: 2, stack: 'mixed', strictRoute: true },
+    { attempt: 3, stack: 'gvisor', strictRoute: false }
+  ];
 
-  const singBoxJson = VmessLinkParser.toSingBoxConfigJson(profile, {
-    clashApiPort: currentClashApiPort,
-    enableHotspot: hotspot.isHotspotSharingEnabled,
-    hotspotPort: hotspot.hotspotProxyPort || 10808,
-    hotspotRequireAuth: hotspot.requireAuth,
-    hotspotUsername: hotspot.username,
-    hotspotPassword: hotspot.password,
-    bypassLan: exclude?.enabled ? exclude.bypassLan : desktopSettings.isBypassLan,
-    bypassDirectDomains: exclude?.enabled ? exclude.bypassDirectDomains : undefined,
-    bypassDirectIps: exclude?.enabled ? exclude.bypassDirectIps : undefined,
-    bypassProcesses: exclude?.enabled ? exclude.bypassProcesses : undefined,
-    primaryDns: desktopSettings.primaryDns,
-    secondaryDns: desktopSettings.secondaryDns,
-    ruleSetPath,
-    blockedDomains: ruleSetPath ? undefined : activeBlockedDomains,
-    logLevel: desktopSettings.logLevel,
-    tunInterfaceName: 'v2raydp-tun'
-  });
+  let lastFailureReason = '';
 
-  fs.writeFileSync(singBoxConfigPath, singBoxJson, 'utf8');
+  for (const { attempt, stack, strictRoute } of attempts) {
+    if (isStoppingIntentionally) {
+      return false;
+    }
 
-  // Verify configuration before spawning: sing-box check -c config.json
-  const checkResult = await checkSingBoxConfig(binaryPath, singBoxConfigPath);
-  if (!checkResult.ok) {
-    const errorMsg = `Configuration check failed:\n${checkResult.output}`;
-    addLog('ERROR', 'sing-box', errorMsg);
+    const attemptText = `Connecting... (attempt ${attempt}/3)`;
+    addLog('INFO', 'sing-box', attemptText);
     currentConnectionState = {
-      status: 'error',
-      reason: errorMsg,
-      errorMessage: errorMsg,
-      activeProfile: null
+      status: 'connecting',
+      reason: attemptText,
+      profileName: profile.name,
+      activeProfile: profile,
+      connectedAt: Date.now(),
+      virtualAdapterName: 'v2raydp-tun'
     };
     mainWindow?.webContents.send('on-state-change', currentConnectionState);
     updateTrayMenu();
-    sendAppNotification('v2rayDP VPN', 'VPN connection failed: Invalid configuration');
-    return false;
-  }
 
-  let lastLines: string[] = [];
-  const binDir = path.dirname(binaryPath);
+    // Allocate free random port for clash_api
+    currentClashApiPort = await getFreeRandomPort();
 
-  try {
+    const singBoxJson = VmessLinkParser.toSingBoxConfigJson(profile, {
+      clashApiPort: currentClashApiPort,
+      tunStack: stack,
+      strictRoute: strictRoute,
+      enableHotspot: hotspot.isHotspotSharingEnabled,
+      hotspotPort: hotspot.hotspotProxyPort || 10808,
+      hotspotRequireAuth: hotspot.requireAuth,
+      hotspotUsername: hotspot.username,
+      hotspotPassword: hotspot.password,
+      bypassLan: exclude?.enabled ? exclude.bypassLan : desktopSettings.isBypassLan,
+      bypassDirectDomains: exclude?.enabled ? exclude.bypassDirectDomains : undefined,
+      bypassDirectIps: exclude?.enabled ? exclude.bypassDirectIps : undefined,
+      bypassProcesses: exclude?.enabled ? exclude.bypassProcesses : undefined,
+      primaryDns: desktopSettings.primaryDns,
+      secondaryDns: desktopSettings.secondaryDns,
+      ruleSetPath,
+      blockedDomains: ruleSetPath ? undefined : activeBlockedDomains,
+      logLevel: desktopSettings.logLevel,
+      tunInterfaceName: 'v2raydp-tun'
+    });
+
+    fs.writeFileSync(singBoxConfigPath, singBoxJson, 'utf8');
+
+    // Verify configuration before spawning: sing-box check -c config.json
+    const checkResult = await checkSingBoxConfig(binaryPath, singBoxConfigPath);
+    if (!checkResult.ok) {
+      const errorMsg = `Configuration check failed:\n${checkResult.output}`;
+      addLog('ERROR', 'sing-box', errorMsg);
+      currentConnectionState = {
+        status: 'error',
+        reason: errorMsg,
+        errorMessage: errorMsg,
+        activeProfile: null
+      };
+      mainWindow?.webContents.send('on-state-change', currentConnectionState);
+      updateTrayMenu();
+      sendAppNotification('v2rayDP VPN', 'VPN connection failed: Invalid configuration');
+      return false;
+    }
+
+    let lastLines: string[] = [];
+    let startedLineDetected = false;
+    const binDir = path.dirname(binaryPath);
+
     const child = spawn(binaryPath, ['run', '-c', singBoxConfigPath], {
       cwd: binDir,
       windowsHide: true,
@@ -764,22 +799,30 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     });
     currentSingBoxChild = child;
 
-    const appendLog = (line: string) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      lastLines.push(trimmed);
+    const appendLog = (rawLine: string) => {
+      // 6) Clean logs: strip ANSI codes
+      const line = rawLine
+        .replace(/\u001b\[[0-9;]*m/g, '')
+        .replace(/\[[0-9;]*m/g, '')
+        .trim();
+      if (!line) return;
+      lastLines.push(line);
       if (lastLines.length > 20) lastLines.shift();
 
-      if (trimmed.includes('FATAL') || trimmed.includes('panic:')) {
-        addLog('ERROR', 'sing-box', trimmed);
-      } else if (trimmed.includes('WARN')) {
-        addLog('WARN', 'sing-box', trimmed);
+      if (line.includes('sing-box started')) {
+        startedLineDetected = true;
+      }
+
+      if (line.includes('ERROR') || line.includes('FATAL') || line.includes('panic:')) {
+        addLog('ERROR', 'sing-box', line);
+      } else if (line.includes('WARN')) {
+        addLog('WARN', 'sing-box', line);
       } else {
-        addLog('INFO', 'sing-box', trimmed);
+        addLog('INFO', 'sing-box', line);
       }
 
       // Check if connection was rejected (derive blocked counter)
-      if (trimmed.toLowerCase().includes('reject') || trimmed.toLowerCase().includes('blocked')) {
+      if (line.toLowerCase().includes('reject') || line.toLowerCase().includes('blocked')) {
         if (store.block.totalBlockedCount === null) {
           store.block.totalBlockedCount = 1;
           store.block.sessionBlockedCount = 1;
@@ -802,7 +845,6 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     child.on('error', (err) => {
       if (child !== currentSingBoxChild) return;
       addLog('ERROR', 'sing-box', `Process error: ${err.message}`);
-      disconnectVpnInternal(`sing-box process crashed: ${err.message}`);
     });
 
     child.on('exit', (code, signal) => {
@@ -815,91 +857,83 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
       }
     });
 
-    // Wait for clash_api to respond on /version (up to 10s)
-    const isReady = await waitForClashApiReady(currentClashApiPort, child, 10000);
-
-    if (!isReady || child !== currentSingBoxChild || child.exitCode !== null) {
-      const failReason = lastLines.join('\n') || 'Failed to initialize TUN virtual adapter or clash_api';
-      addLog('ERROR', 'sing-box', `Startup failure: ${failReason}`);
-      await stopCurrentSingBoxProcess();
-
-      currentConnectionState = {
-        status: 'error',
-        reason: failReason,
-        errorMessage: failReason,
-        activeProfile: null
-      };
-      mainWindow?.webContents.send('on-state-change', currentConnectionState);
-      updateTrayMenu();
-      sendAppNotification('v2rayDP VPN', `VPN connection failed: ${failReason.substring(0, 50)}`);
-      return false;
-    }
-
-    // Wait until Wintun virtual adapter is Up in Windows
-    const adapterUp = await waitForTunAdapterUp('v2raydp-tun', 10000);
-    if (!adapterUp) {
-      const failReason = 'Virtual network adapter "v2raydp-tun" did not reach Up state';
-      addLog('ERROR', 'TUN', failReason);
-      await stopCurrentSingBoxProcess();
-
-      currentConnectionState = {
-        status: 'error',
-        reason: failReason,
-        errorMessage: failReason,
-        activeProfile: null
-      };
-      mainWindow?.webContents.send('on-state-change', currentConnectionState);
-      updateTrayMenu();
-      sendAppNotification('v2rayDP VPN', `VPN connection failed: ${failReason}`);
-      return false;
-    }
-
-    // Connected successfully!
-    connectStartTime = Date.now();
-    prevStatsUplink = 0;
-    prevStatsDownlink = 0;
-    trafficStats = {
-      uploadSpeedBps: 0,
-      downloadSpeedBps: 0,
-      sessionTxBytes: 0,
-      sessionRxBytes: 0,
-      connectedDurationSeconds: 0
-    };
-
-    currentConnectionState = {
-      status: 'connected',
-      reason: 'Connected',
-      profileName: profile.name,
-      activeProfile: profile,
-      connectedAt: connectStartTime,
-      virtualAdapterName: 'v2raydp-tun'
-    };
-
-    mainWindow?.webContents.send('on-state-change', currentConnectionState);
-    mainWindow?.webContents.send('on-traffic-stats', trafficStats);
-    updateTrayMenu();
-    startRealTrafficMonitor(currentClashApiPort);
-    addLog(
-      'INFO',
-      'TUN',
-      `Full-Device VPN active for "${profile.name}" via Wintun adapter (v2raydp-tun). All system traffic routed.`
+    // 1) Longer, smarter wait (up to 30s)
+    const isReady = await waitForClashApiOrStarted(
+      currentClashApiPort,
+      child,
+      30000,
+      () => startedLineDetected
     );
-    sendAppNotification('v2rayDP VPN', 'VPN service started');
-    return true;
-  } catch (err: unknown) {
-    const errorMsg = (err as Error).message;
-    addLog('ERROR', 'sing-box', `Failed to start sing-box: ${errorMsg}`);
-    currentConnectionState = {
-      status: 'error',
-      reason: errorMsg,
-      errorMessage: errorMsg,
-      activeProfile: null
-    };
-    mainWindow?.webContents.send('on-state-change', currentConnectionState);
-    updateTrayMenu();
-    sendAppNotification('v2rayDP VPN', `VPN connection failed: ${errorMsg}`);
-    return false;
+
+    if (isReady && child === currentSingBoxChild && child.exitCode === null) {
+      // Connected successfully!
+      connectStartTime = Date.now();
+      prevStatsUplink = 0;
+      prevStatsDownlink = 0;
+      trafficStats = {
+        uploadSpeedBps: 0,
+        downloadSpeedBps: 0,
+        sessionTxBytes: 0,
+        sessionRxBytes: 0,
+        connectedDurationSeconds: 0
+      };
+
+      currentConnectionState = {
+        status: 'connected',
+        reason: 'Connected',
+        profileName: profile.name,
+        activeProfile: profile,
+        connectedAt: connectStartTime,
+        virtualAdapterName: 'v2raydp-tun'
+      };
+
+      mainWindow?.webContents.send('on-state-change', currentConnectionState);
+      mainWindow?.webContents.send('on-traffic-stats', trafficStats);
+      updateTrayMenu();
+      startRealTrafficMonitor(currentClashApiPort);
+      addLog(
+        'INFO',
+        'TUN',
+        `Full-Device VPN active for "${profile.name}" via Wintun adapter (v2raydp-tun). All system traffic routed.`
+      );
+
+      // 4) Faster adapter check runs in background without blocking connected state
+      waitForTunAdapterUp('v2raydp-tun', 8000).then((isUp) => {
+        if (isUp) {
+          sendAppNotification('v2rayDP VPN', 'VPN service started');
+        }
+      });
+
+      return true;
+    }
+
+    // Attempt failed
+    const failReason = lastLines.length > 0 ? lastLines.join('\n') : 'VPN engine did not start in 30s';
+    lastFailureReason = failReason;
+    addLog('WARN', 'sing-box', `Attempt ${attempt}/3 failed: ${failReason}`);
+
+    await stopCurrentSingBoxProcess();
+    await killStaleProcesses();
+    await cleanupStaleTunAndRoutes();
+
+    if (attempt < 3) {
+      await new Promise((r) => setTimeout(r, 1500));
+    }
   }
+
+  // All 3 attempts failed
+  const finalError = lastFailureReason || 'VPN engine did not start in 30s';
+  addLog('ERROR', 'sing-box', `Startup failed after 3 attempts: ${finalError}`);
+  currentConnectionState = {
+    status: 'error',
+    reason: finalError,
+    errorMessage: finalError,
+    activeProfile: null
+  };
+  mainWindow?.webContents.send('on-state-change', currentConnectionState);
+  updateTrayMenu();
+  sendAppNotification('v2rayDP VPN', `VPN connection failed`);
+  return false;
 }
 
 async function disconnectVpnInternal(reason = 'Disconnected'): Promise<void> {
@@ -907,6 +941,7 @@ async function disconnectVpnInternal(reason = 'Disconnected'): Promise<void> {
   await stopCurrentSingBoxProcess();
   await killStaleProcesses();
   await cleanupStaleTunAndRoutes();
+  await new Promise((r) => setTimeout(r, 300));
 
   currentConnectionState = {
     status: 'disconnected',
@@ -1242,9 +1277,9 @@ function createMainWindow(): void {
   const shouldStartMinimized = store.settings.startMinimized || process.argv.includes('--minimized');
 
   mainWindow = new BrowserWindow({
-    width: 1060,
+    width: 880,
     height: 740,
-    minWidth: 880,
+    minWidth: 720,
     minHeight: 620,
     backgroundColor: '#090D16',
     title: 'v2rayDP Desktop - VPN (TUN)',
@@ -1500,34 +1535,70 @@ ipcMain.handle('duplicate-profile', async (_e, id: string) => {
   return cloned;
 });
 
-ipcMain.handle('import-profiles-text', async (_e, text: string) => {
-  const lines = (text || '').split(/\r?\n/);
-  let added = 0;
-  let failed = 0;
+ipcMain.handle('import-profiles-text', async (_e, rawText: string) => {
+  // Clean text: remove zero-width chars and BOM, normalize \r\n
+  let text = (rawText || '')
+    .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    if (
-      trimmed.toLowerCase().startsWith('vless://') ||
-      trimmed.toLowerCase().startsWith('vmess://') ||
-      trimmed.toLowerCase().startsWith('trojan://')
-    ) {
-      try {
-        const parsed = VmessLinkParser.parse(trimmed);
-        parsed.id = `prof-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-        parsed.createdAt = Date.now();
-        parsed.isSelected = store.profiles.length === 0;
-        store.profiles.push(parsed);
-        added++;
-      } catch {
-        failed++;
+  // Check if text is a single base64 subscription block (no protocol scheme)
+  const trimmed = text.trim();
+  if (
+    !trimmed.includes('://') &&
+    trimmed.length > 20 &&
+    /^[A-Za-z0-9+/=]+$/.test(trimmed.replace(/\s+/g, ''))
+  ) {
+    try {
+      const decoded = Buffer.from(trimmed.replace(/\s+/g, ''), 'base64').toString('utf8');
+      if (decoded.includes('://')) {
+        text = decoded;
       }
+    } catch {}
+  }
+
+  // Extract links via regex
+  const linkRegex = /(?:vless|vmess|trojan):\/\/[^\s"'<>]+/gi;
+  const matches = text.match(linkRegex) || [];
+
+  let added = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+
+  for (const link of matches) {
+    try {
+      const parsed = VmessLinkParser.parse(link);
+      // Skip duplicates: same address + port + uuid/password
+      const isDuplicate = store.profiles.some(
+        (p) =>
+          p.address === parsed.address &&
+          p.port === parsed.port &&
+          ((parsed.uuid && p.uuid === parsed.uuid) || (parsed.password && p.password === parsed.password))
+      );
+
+      if (isDuplicate) {
+        skipped++;
+        continue;
+      }
+
+      parsed.id = `prof-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      parsed.createdAt = Date.now();
+      parsed.isSelected = store.profiles.length === 0;
+      store.profiles.push(parsed);
+      added++;
+      addLog('INFO', 'app', `Imported profile: ${parsed.name}`);
+    } catch (err: unknown) {
+      const msg = (err as Error)?.message || 'Failed to parse link';
+      errors.push(msg);
+      addLog('WARN', 'app', `Import failed: ${msg}`);
     }
   }
 
-  saveStore();
-  return { added, failed };
+  if (added > 0) {
+    saveStore();
+  }
+
+  return { added, errors, skipped };
 });
 
 ipcMain.handle('export-profiles-json', async () => {
@@ -1888,6 +1959,15 @@ ipcMain.handle('restart-as-admin', async () => {
   }
 });
 
+ipcMain.handle('read-clipboard-text', async () => {
+  try {
+    return clipboard.readText();
+  } catch (err) {
+    console.error('Failed to read clipboard in main process:', err);
+    return '';
+  }
+});
+
 function verifyIpcHandlersRegistered(): void {
   const expectedChannels = [
     'get-profiles',
@@ -1898,6 +1978,7 @@ function verifyIpcHandlersRegistered(): void {
     'import-profiles-text',
     'export-profiles-json',
     'import-profiles-json',
+    'read-clipboard-text',
     'start-vpn',
     'stop-vpn',
     'get-connection-state',
