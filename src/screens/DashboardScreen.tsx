@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ServerProfile, ConnectionState, TrafficStats, AppLog } from '../core/types';
+import { ServerProfile, ConnectionState, TrafficStats, AppLog, PublicIpInfo } from '../core/types';
 import {
   Play,
   Square,
@@ -24,12 +24,15 @@ import {
   Layers,
   Check,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Globe,
+  ShieldCheck
 } from 'lucide-react';
 import { VmessLinkParser } from '../core/VmessLinkParser';
 import { QrCodeModal } from '../components/QrCodeModal';
 import { SingBoxConfigModal } from '../components/SingBoxConfigModal';
 import { EditProfileModal } from '../components/EditProfileModal';
+import { VpnRoutingModal } from '../components/VpnRoutingModal';
 
 interface DashboardScreenProps {
   connectionState: ConnectionState;
@@ -99,6 +102,62 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   const [isLogsOpen, setIsLogsOpen] = useState(false);
   const [logFilter, setLogFilter] = useState<'ALL' | 'ERROR'>('ALL');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // IP & Country check state
+  const [publicIp, setPublicIp] = useState<PublicIpInfo | null>(null);
+  const [realIp, setRealIp] = useState<PublicIpInfo | null>(null);
+  const [isCheckingIp, setIsCheckingIp] = useState(false);
+  const [isRoutingModalOpen, setIsRoutingModalOpen] = useState(false);
+  const [geoCache, setGeoCache] = useState<Record<string, { country: string; countryCode: string; flag: string; isCdn?: boolean }>>({});
+
+  const countryCodeToFlag = (countryCode: string): string => {
+    if (!countryCode || countryCode.length !== 2) return '🌐';
+    const codePoints = countryCode
+      .toUpperCase()
+      .split('')
+      .map((char) => 127397 + char.charCodeAt(0));
+    return String.fromCodePoint(...codePoints);
+  };
+
+  const refreshIp = async (forceFresh = false) => {
+    setIsCheckingIp(true);
+    try {
+      const [freshIp, origIp] = await Promise.all([
+        window.api?.checkPublicIp ? window.api.checkPublicIp(forceFresh) : Promise.resolve(null),
+        window.api?.getRealIp ? window.api.getRealIp() : Promise.resolve(null)
+      ]);
+      if (freshIp) setPublicIp(freshIp);
+      if (origIp) setRealIp(origIp);
+    } catch {} finally {
+      setIsCheckingIp(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshIp(false);
+  }, [isConnected]);
+
+  // Lazy resolve node server countries
+  useEffect(() => {
+    const api = window.api;
+    if (!api?.resolveServerCountry) return;
+    profiles.forEach((p) => {
+      if (!p.address || geoCache[p.address]) return;
+      api.resolveServerCountry(p.address).then((info) => {
+        if (info) {
+          setGeoCache((prev) => ({
+            ...prev,
+            [p.address]: {
+              country: info.country,
+              countryCode: info.countryCode,
+              flag: countryCodeToFlag(info.countryCode),
+              isCdn: info.isCdn
+            }
+          }));
+        }
+      }).catch(() => {});
+    });
+  }, [profiles]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -446,7 +505,9 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           </div>
           <div>
             <div className="text-[10px] uppercase tracking-wider text-slate-400 font-medium">Download</div>
-            <div className="text-sm font-bold text-white font-mono">{formatSpeed(trafficStats.downloadSpeedBps)}</div>
+            <div className="text-sm font-bold text-white font-mono">
+              {isConnecting ? '0 KB/s' : formatSpeed(trafficStats.downloadSpeedBps)}
+            </div>
           </div>
         </div>
 
@@ -457,7 +518,9 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           </div>
           <div>
             <div className="text-[10px] uppercase tracking-wider text-slate-400 font-medium">Upload</div>
-            <div className="text-sm font-bold text-white font-mono">{formatSpeed(trafficStats.uploadSpeedBps)}</div>
+            <div className="text-sm font-bold text-white font-mono">
+              {isConnecting ? '0 KB/s' : formatSpeed(trafficStats.uploadSpeedBps)}
+            </div>
           </div>
         </div>
 
@@ -469,7 +532,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           <div>
             <div className="text-[10px] uppercase tracking-wider text-slate-400 font-medium">Session Data</div>
             <div className="text-xs font-bold text-white font-mono">
-              {formatBytes(trafficStats.sessionRxBytes + trafficStats.sessionTxBytes)}
+              {isConnecting ? '0 B' : formatBytes(trafficStats.sessionRxBytes + trafficStats.sessionTxBytes)}
             </div>
           </div>
         </div>
@@ -485,6 +548,73 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
               {isConnected ? formatDuration(trafficStats.connectedDurationSeconds) : '00:00'}
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* NetMod Style IP Card */}
+      <div className="bg-[#111827] border border-slate-800 rounded-2xl p-3.5 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-center space-x-3">
+          <div className="w-10 h-10 rounded-xl bg-cyan-950/40 border border-cyan-800/50 flex items-center justify-center text-cyan-400 shrink-0">
+            <Globe className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center space-x-2">
+              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Public IP & Country</span>
+              {isConnected ? (
+                publicIp?.ip && realIp?.ip && publicIp.ip !== realIp.ip ? (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950/80 border border-emerald-500/50 text-emerald-300">
+                    IP Changed
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950/80 border border-amber-500/50 text-amber-300">
+                    Same IP / Country
+                  </span>
+                )
+              ) : (
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-900 border border-slate-800 text-slate-400">
+                  VPN Idle
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center space-x-3 text-xs mt-1">
+              <div>
+                <span className="text-slate-500 text-[10px] mr-1">Exit:</span>
+                <span className="font-mono font-bold text-white">
+                  {publicIp?.flag || '🌐'} {publicIp?.ip || 'Checking...'}
+                </span>
+                {publicIp?.countryCode && (
+                  <span className="text-slate-400 ml-1 font-mono text-[11px]">({publicIp.countryCode})</span>
+                )}
+              </div>
+              {realIp?.ip && (
+                <div className="hidden sm:block text-slate-400">
+                  <span className="text-slate-500 text-[10px] mr-1">Real:</span>
+                  <span className="font-mono text-slate-300">{realIp.flag || '🌐'} {realIp.ip}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center space-x-2 shrink-0">
+          <button
+            onClick={() => refreshIp(true)}
+            disabled={isCheckingIp}
+            title="Refresh Exit IP"
+            className="px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-cyan-500/40 text-slate-300 hover:text-cyan-300 text-xs font-semibold flex items-center space-x-1.5 transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isCheckingIp ? 'animate-spin text-cyan-400' : ''}`} />
+            <span>Refresh</span>
+          </button>
+          <button
+            onClick={() => setIsRoutingModalOpen(true)}
+            title="Test VPN routing and leak diagnostics"
+            className="px-3 py-1.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-300 text-xs font-bold flex items-center space-x-1.5 transition-colors cursor-pointer"
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>Test Routing</span>
+          </button>
         </div>
       </div>
 
@@ -533,6 +663,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             const ping = prof.pingLatencyMs;
             const isPingingThis = pingingProfileId === prof.id;
 
+            const geo = geoCache[prof.address];
+
             return (
               <div
                 key={prof.id}
@@ -572,8 +704,19 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                   <div className="min-w-0">
                     <div className="flex items-center space-x-2">
                       <span className="font-bold text-sm text-white truncate">{prof.name}</span>
+                      {geo && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700/80 text-cyan-300 flex items-center space-x-1 shrink-0">
+                          <span>{geo.flag}</span>
+                          <span>{geo.countryCode}</span>
+                        </span>
+                      )}
+                      {geo?.isCdn && (
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-950/80 text-purple-300 border border-purple-500/40 font-mono shrink-0">
+                          CDN
+                        </span>
+                      )}
                       {isCurrentActive && (
-                        <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-400 border border-emerald-600/50">
+                        <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-400 border border-emerald-600/50 shrink-0">
                           ACTIVE
                         </span>
                       )}
@@ -787,6 +930,13 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           onClose={() => setJsonModalProfile(null)}
         />
       )}
+
+      {/* VPN Routing Diagnostic Modal */}
+      <VpnRoutingModal
+        isOpen={isRoutingModalOpen}
+        onClose={() => setIsRoutingModalOpen(false)}
+        isConnected={isConnected}
+      />
     </div>
   );
 };

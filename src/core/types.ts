@@ -34,6 +34,12 @@ export interface ServerProfile {
   pingLatencyMs?: number; // -1 if failed or not tested
   lastPingTimestamp?: number;
   createdAt?: number;
+  serverCountry?: string; // e.g. "Singapore"
+  serverCountryCode?: string; // e.g. "SG"
+  serverIp?: string;
+  serverIsp?: string;
+  isCdn?: boolean;
+  lastGeoLookupTimestamp?: number;
 }
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -132,6 +138,11 @@ export interface BlockSettings {
   totalBlockedCount: number | null;
 }
 
+export const AUTOMATION_SPECIAL_PROFILES = {
+  SELECTED: '__selected__',
+  LAST_CONNECTED: '__last__'
+} as const;
+
 export interface DesktopSettings {
   mode: 'tun'; // Sing-box TUN VPN
   connectionMode?: 'tun' | 'system_proxy'; // "TUN (full device)" or "System proxy (fast)"
@@ -145,6 +156,9 @@ export interface DesktopSettings {
   startMinimized: boolean;
   autoConnectOnLaunch: boolean;
   showNotifications?: boolean; // default true
+  showIpOnHome?: boolean; // default true
+  checkIpOnConnect?: boolean; // default true
+  preferIpv4Only?: boolean;
 }
 
 export interface ExcludeSettings {
@@ -177,6 +191,33 @@ export interface HotspotInfo {
   socksPort: number;
   httpPort: number;
   ipAddresses: string[];
+}
+
+export interface PublicIpInfo {
+  ip: string;
+  country: string;
+  countryCode: string;
+  city?: string;
+  region?: string;
+  isp?: string;
+  org?: string;
+  flag?: string;
+  isVpn?: boolean;
+  queryTimestamp?: number;
+}
+
+export interface VpnRoutingTestResult {
+  adapterUp: boolean;
+  adapterName?: string;
+  mode: 'tun' | 'system_proxy';
+  realIp: string;
+  vpnIp: string;
+  ipChanged: boolean;
+  dnsServers: string[];
+  dnsLeakDetected: boolean;
+  ipv6LeakDetected: boolean;
+  latencyMs: number;
+  testedAt: number;
 }
 
 export interface ApiInterface {
@@ -241,6 +282,12 @@ export interface ApiInterface {
   getLogs: () => Promise<AppLog[]>;
   clearLogs: () => Promise<boolean>;
   onLog: (callback: (log: AppLog) => void) => () => void;
+
+  // IP & Routing Check
+  checkPublicIp: (forceFresh?: boolean) => Promise<PublicIpInfo | null>;
+  getRealIp: () => Promise<PublicIpInfo | null>;
+  testVpnRouting: () => Promise<VpnRoutingTestResult>;
+  resolveServerCountry: (address: string) => Promise<{ country: string; countryCode: string; isp?: string; isCdn?: boolean } | null>;
 
   // System Helpers
   openExternalUrl: (url: string) => Promise<void>;

@@ -43,7 +43,7 @@ export const AutomationScreen: React.FC<AutomationScreenProps> = ({
   const [showAddModal, setShowAddModal] = useState(false);
   const [newSsid, setNewSsid] = useState('');
   const [newAction, setNewAction] = useState<'connect' | 'do_not_connect'>('connect');
-  const [newProfileId, setNewProfileId] = useState<string>(profiles[0]?.id || '');
+  const [newProfileId, setNewProfileId] = useState<string>('__selected__');
   const [addError, setAddError] = useState('');
 
   const handleToggleMaster = async (enabled: boolean) => {
@@ -344,7 +344,15 @@ export const AutomationScreen: React.FC<AutomationScreenProps> = ({
                       </div>
                       <p className="text-[11px] text-slate-500 mt-0.5">
                         {rule.enabled
-                          ? 'Rule is active'
+                          ? (rule.action === 'connect'
+                              ? `Active → ${
+                                  rule.profileId === '__selected__'
+                                    ? `★ Selected profile (${profiles.find((p) => p.isSelected)?.name || profiles[0]?.name || 'None'})`
+                                    : rule.profileId === '__last__'
+                                    ? '⟲ Last connected profile'
+                                    : profiles.find((p) => p.id === rule.profileId)?.name || 'Unknown profile'
+                                }`
+                              : 'Active → Do Not Connect')
                           : 'Rule disabled (ignored completely; falls back to Any other Wi-Fi)'}
                       </p>
                     </div>
@@ -365,11 +373,13 @@ export const AutomationScreen: React.FC<AutomationScreenProps> = ({
                     {/* Target Profile Dropdown (if connect) */}
                     {rule.action === 'connect' && (
                       <select
-                        value={rule.profileId || ''}
+                        value={rule.profileId || '__selected__'}
                         onChange={(e) => handleUpdateRuleProfile(rule.id, e.target.value)}
-                        className="bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-1.5 text-xs text-cyan-300 focus:outline-none focus:border-cyan-500 max-w-[200px]"
+                        className="bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-1.5 text-xs text-cyan-300 focus:outline-none focus:border-cyan-500 max-w-[210px]"
                       >
-                        {profiles.length === 0 && <option value="">No Profiles Available</option>}
+                        <option value="__selected__">★ Selected profile</option>
+                        <option value="__last__">⟲ Last connected profile</option>
+                        <option disabled>──────────</option>
                         {profiles.map((p) => (
                           <option key={p.id} value={p.id}>
                             {p.name} ({p.protocol.toUpperCase()})
@@ -451,7 +461,7 @@ export const AutomationScreen: React.FC<AutomationScreenProps> = ({
 
                     {settings.fallbackRule.action === 'connect' && (
                       <select
-                        value={settings.fallbackRule.profileId || ''}
+                        value={settings.fallbackRule.profileId || '__selected__'}
                         onChange={(e) =>
                           handleUpdate({
                             fallbackRule: {
@@ -460,8 +470,11 @@ export const AutomationScreen: React.FC<AutomationScreenProps> = ({
                             }
                           })
                         }
-                        className="bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-1.5 text-xs text-cyan-300 focus:outline-none focus:border-cyan-500 max-w-[200px]"
+                        className="bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-1.5 text-xs text-cyan-300 focus:outline-none focus:border-cyan-500 max-w-[210px]"
                       >
+                        <option value="__selected__">★ Selected profile</option>
+                        <option value="__last__">⟲ Last connected profile</option>
+                        <option disabled>──────────</option>
                         {profiles.map((p) => (
                           <option key={p.id} value={p.id}>
                             {p.name} ({p.protocol.toUpperCase()})
@@ -672,6 +685,9 @@ export const AutomationScreen: React.FC<AutomationScreenProps> = ({
                     onChange={(e) => setNewProfileId(e.target.value)}
                     className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500"
                   >
+                    <option value="__selected__">★ Selected profile (Default)</option>
+                    <option value="__last__">⟲ Last connected profile</option>
+                    <option disabled>──────────</option>
                     {profiles.map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name} ({p.protocol.toUpperCase()})

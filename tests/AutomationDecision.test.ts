@@ -320,4 +320,57 @@ describe('AutomationDecision Engine - SSID Rules & Policies', () => {
     expect(result.action.type).toBe('NO_OP');
     expect(result.statusMessage).toContain('Preserving manual connection');
   });
+
+  it('12. should resolve __selected__ special profile to currently selected profile', () => {
+    const dynamicSettings: AutomationSettings = {
+      ...baseSettings,
+      rules: [
+        {
+          id: 'rule-dynamic',
+          ssid: 'DynamicWiFi',
+          action: 'connect',
+          profileId: '__selected__',
+          enabled: true
+        }
+      ]
+    };
+
+    const result = AutomationDecision.evaluate({
+      settings: dynamicSettings,
+      wifiStatus: { connected: true, ssid: 'DynamicWiFi' },
+      currentConnectionStatus: 'disconnected',
+      isVpnRunning: false,
+      selectedProfileId: 'profile-user-selected-sg'
+    });
+
+    expect(result.action.type).toBe('START_VPN');
+    if (result.action.type === 'START_VPN') {
+      expect(result.action.profileId).toBe('profile-user-selected-sg');
+    }
+  });
+
+  it('13. should resolve __last__ special profile in fallback to last connected profile', () => {
+    const lastConnectedSettings: AutomationSettings = {
+      ...baseSettings,
+      rules: [],
+      fallbackRule: {
+        enabled: true,
+        action: 'connect',
+        profileId: '__last__'
+      }
+    };
+
+    const result = AutomationDecision.evaluate({
+      settings: lastConnectedSettings,
+      wifiStatus: { connected: true, ssid: 'CoffeeShop' },
+      currentConnectionStatus: 'disconnected',
+      isVpnRunning: false,
+      lastConnectedProfileId: 'profile-previous-jp'
+    });
+
+    expect(result.action.type).toBe('START_VPN');
+    if (result.action.type === 'START_VPN') {
+      expect(result.action.profileId).toBe('profile-previous-jp');
+    }
+  });
 });

@@ -22,6 +22,8 @@ export interface DecisionInput {
   currentConnectionStatus: ConnectionStatus;
   isVpnRunning: boolean;
   runningProfileId?: string | null;
+  selectedProfileId?: string | null;
+  lastConnectedProfileId?: string | null;
   autoRetryCount?: number;
   source?: string;
 }
@@ -53,6 +55,8 @@ export class AutomationDecision {
       currentConnectionStatus,
       isVpnRunning,
       runningProfileId = null,
+      selectedProfileId = null,
+      lastConnectedProfileId = null,
       autoRetryCount = 0,
       source = 'poll'
     } = input;
@@ -201,13 +205,21 @@ export class AutomationDecision {
       if (matchedRule) {
         // Enabled specific rule found for this SSID!
         if (matchedRule.action === 'connect') {
-          const targetProfileId = matchedRule.profileId;
+          const resolved = this.resolveTargetProfileId(
+            matchedRule.profileId,
+            selectedProfileId,
+            lastConnectedProfileId
+          );
+          const targetProfileId = resolved.resolvedId;
           if (!targetProfileId) {
+            const extra = resolved.isSpecial
+              ? (resolved.specialType === 'SELECTED' ? ' (no profile is selected)' : ' (no profile was previously connected)')
+              : '';
             return {
-              action: { type: 'NO_OP', reason: `Rule matched for "${matchedRule.ssid}" but no profile selected` },
+              action: { type: 'NO_OP', reason: `Rule matched for "${matchedRule.ssid}" but target profile could not be resolved${extra}` },
               updatedSettings,
-              statusMessage: `Matched "${matchedRule.ssid}", but no profile is assigned`,
-              logMessage: `Rule for "${matchedRule.ssid}" has no profile assigned`,
+              statusMessage: `Matched "${matchedRule.ssid}", but profile is not available`,
+              logMessage: `Rule for "${matchedRule.ssid}" target profile could not be resolved${extra}`,
               logLevel: 'WARN'
             };
           }
@@ -221,7 +233,7 @@ export class AutomationDecision {
               },
               updatedSettings,
               statusMessage: `Connected to Wi-Fi (${currentCleanSsid}) -> Auto-starting VPN`,
-              logMessage: `Auto-connecting VPN with profile assigned to "${matchedRule.ssid}"`,
+              logMessage: `Auto-connecting VPN with profile assigned to "${matchedRule.ssid}" (${targetProfileId})`,
               logLevel: 'AUTO'
             };
           } else {
@@ -288,12 +300,20 @@ export class AutomationDecision {
 
     // Fallback switch is ON
     if (fallback.action === 'connect') {
-      const targetProfileId = fallback.profileId;
+      const resolved = this.resolveTargetProfileId(
+        fallback.profileId,
+        selectedProfileId,
+        lastConnectedProfileId
+      );
+      const targetProfileId = resolved.resolvedId;
       if (!targetProfileId) {
+        const extra = resolved.isSpecial
+          ? (resolved.specialType === 'SELECTED' ? ' (no profile is selected)' : ' (no profile was previously connected)')
+          : '';
         return {
-          action: { type: 'NO_OP', reason: '"Any other Wi-Fi" enabled but no fallback profile configured' },
+          action: { type: 'NO_OP', reason: `"Any other Wi-Fi" enabled but fallback profile could not be resolved${extra}` },
           updatedSettings,
-          statusMessage: 'No profile configured for "Any other Wi-Fi" fallback',
+          statusMessage: 'No profile available for "Any other Wi-Fi" fallback',
           logLevel: 'WARN'
         };
       }
@@ -352,6 +372,21 @@ export class AutomationDecision {
         };
       }
     }
+  }
+
+  static resolveTargetProfileId(
+    targetId: string | null | undefined,
+    selectedId: string | null | undefined,
+    lastConnectedId: string | null | undefined
+  ): { resolvedId: string | null; isSpecial: boolean; specialType?: 'SELECTED' | 'LAST_CONNECTED' } {
+    if (!targetId) return { resolvedId: null, isSpecial: false };
+    if (targetId === '__selected__') {
+      return { resolvedId: selectedId || null, isSpecial: true, specialType: 'SELECTED' };
+    }
+    if (targetId === '__last__') {
+      return { resolvedId: lastConnectedId || null, isSpecial: true, specialType: 'LAST_CONNECTED' };
+    }
+    return { resolvedId: targetId, isSpecial: false };
   }
 
   static cleanSsid(raw: string | null | undefined): string | null {

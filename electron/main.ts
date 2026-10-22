@@ -14,12 +14,13 @@
  * - Elevated Windows Task Scheduler for Start-with-Windows
  */
 
-import { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, Notification, clipboard } from 'electron';
+import { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, NativeImage, dialog, Notification, clipboard } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as net from 'net';
 import * as tls from 'tls';
+import * as dns from 'dns';
 import { spawn, exec, ChildProcess } from 'child_process';
 import {
   ServerProfile,
@@ -64,6 +65,8 @@ let isQuitting = false;
 let cleanedUp = false;
 let currentClashApiPort = 9090;
 let currentTunName = 'v2raydp-tun';
+let lastNotif: Notification | null = null;
+let cachedNotificationIcon: NativeImage | undefined = undefined;
 
 // Config store files in userData
 const userDataPath = app.getPath('userData');
@@ -81,6 +84,8 @@ interface AppStore {
   exclude: ExcludeSettings;
   settings: DesktopSettings;
   logs: AppLog[];
+  realIp?: any;
+  lastConnectedProfileId?: string | null;
 }
 
 const DEFAULT_EXCLUDE_SETTINGS: ExcludeSettings = {
@@ -464,13 +469,25 @@ function sendAppNotification(title: string, body: string): void {
   if (store.settings.showNotifications === false) return;
   try {
     if (Notification && Notification.isSupported && Notification.isSupported()) {
-      const notif = new Notification({
+      if (lastNotif) {
+        try {
+          lastNotif.close();
+        } catch {}
+        lastNotif = null;
+      }
+      if (!cachedNotificationIcon) {
+        const iconPath = getAppIconPath('color');
+        if (fs.existsSync(iconPath)) {
+          cachedNotificationIcon = nativeImage.createFromPath(iconPath);
+        }
+      }
+      lastNotif = new Notification({
         title,
         body,
-        icon: getAppIconPath(),
+        icon: cachedNotificationIcon,
         silent: false
       });
-      notif.show();
+      lastNotif.show();
     }
   } catch (err) {
     console.error('Notification error:', err);
@@ -673,14 +690,18 @@ function checkSingBoxConfig(binaryPath: string, configPath: string): Promise<{ o
   });
 }
 
+let lastCheckedConfigHash = '';
+
 /**
- * Waits for clash_api /version (up to 30s) or detects "sing-box started" on stdout/stderr
+ * Waits for clash_api /version or detects "sing-box started" on stdout/stderr.
+ * Fails IMMEDIATELY if fatal errors or process exit occurs.
  */
 function waitForClashApiOrStarted(
   port: number,
   child: ChildProcess,
-  timeoutMs = 30000,
-  checkStartedLine: () => boolean
+  timeoutMs = 25000,
+  checkStartedLine: () => boolean,
+  checkFatalLine: () => boolean
 ): Promise<boolean> {
   const start = Date.now();
   return new Promise((resolve) => {
@@ -708,6 +729,12 @@ function waitForClashApiOrStarted(
         return resolve(false);
       }
 
+      if (checkFatalLine()) {
+        resolved = true;
+        cleanup();
+        return resolve(false);
+      }
+
       if (checkStartedLine()) {
         resolved = true;
         cleanup();
@@ -722,7 +749,7 @@ function waitForClashApiOrStarted(
 
       try {
         const res = await fetch(`http://127.0.0.1:${port}/version`, {
-          signal: AbortSignal.timeout(400)
+          signal: AbortSignal.timeout(200)
         });
         if (res.ok) {
           resolved = true;
@@ -732,7 +759,7 @@ function waitForClashApiOrStarted(
       } catch {}
 
       if (!resolved) {
-        timer = setTimeout(check, 250);
+        timer = setTimeout(check, 100);
       }
     };
 
@@ -741,34 +768,42 @@ function waitForClashApiOrStarted(
 }
 
 async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
-  // Pre-connection status: connecting
+  const t0 = Date.now();
+  const desktopSettings = store.settings;
+  const isSystemProxyMode = desktopSettings.connectionMode === 'system_proxy';
+
+  currentTunName = `v2raydp-${Math.random().toString(36).slice(2, 6)}`;
+
+  // 1. Pre-connection status: connecting
   currentConnectionState = {
     status: 'connecting',
-    reason: 'Connecting... (attempt 1/3)',
+    reason: isSystemProxyMode ? 'Connecting (System proxy mode)...' : 'Connecting...',
     profileName: profile.name,
     activeProfile: profile,
     connectedAt: Date.now(),
-    virtualAdapterName: 'v2raydp-tun'
+    virtualAdapterName: isSystemProxyMode ? 'system-proxy' : currentTunName
   };
   mainWindow?.webContents.send('on-state-change', currentConnectionState);
   updateTrayMenu();
 
-  // 3) Clean start before first spawn
-  await stopCurrentSingBoxProcess();
-  await killStaleProcesses();
-  await cleanupStaleTunAndRoutes();
-  await new Promise((r) => setTimeout(r, 800));
-  stopTrafficMonitor();
-
+  // 2. Parallel preflight preparation
+  const tPrepStart = Date.now();
   const binaryPath = getSingBoxExecutablePath();
   const wintunPath = getWintunDllPath();
-  const desktopSettings = store.settings;
   const hotspot = store.hotspot;
   const exclude = store.exclude;
 
-  // Startup self-check: verify binaries exist
+  // Clean stale processes and adapters in parallel
+  await Promise.all([
+    stopCurrentSingBoxProcess(),
+    killStaleProcesses(),
+    isSystemProxyMode ? Promise.resolve() : cleanupStaleTunAndRoutes()
+  ]);
+  stopTrafficMonitor();
+
+  // Self-check binaries
   if (!fs.existsSync(binaryPath)) {
-    const errorMsg = `sing-box.exe not found at path: ${binaryPath}`;
+    const errorMsg = `sing-box executable not found at: ${binaryPath}`;
     addLog('ERROR', 'sing-box', errorMsg);
     currentConnectionState = {
       status: 'error',
@@ -778,12 +813,12 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     };
     mainWindow?.webContents.send('on-state-change', currentConnectionState);
     updateTrayMenu();
-    sendAppNotification('v2rayDP VPN', `VPN connection failed: sing-box not found`);
+    sendAppNotification('v2rayDP VPN', 'VPN connection failed: sing-box not found');
     return false;
   }
 
-  if (process.platform === 'win32' && !fs.existsSync(wintunPath)) {
-    const errorMsg = `wintun.dll not found at path: ${wintunPath}`;
+  if (!isSystemProxyMode && process.platform === 'win32' && !fs.existsSync(wintunPath)) {
+    const errorMsg = `wintun.dll not found at: ${wintunPath}`;
     addLog('ERROR', 'sing-box', errorMsg);
     currentConnectionState = {
       status: 'error',
@@ -793,29 +828,47 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     };
     mainWindow?.webContents.send('on-state-change', currentConnectionState);
     updateTrayMenu();
-    sendAppNotification('v2rayDP VPN', `VPN connection failed: wintun.dll not found`);
+    sendAppNotification('v2rayDP VPN', 'VPN connection failed: wintun.dll not found');
     return false;
   }
 
-  // Fast preflight server connectivity check (warn only, do not block)
-  addLog('INFO', 'sing-box', `Checking remote server availability: ${profile.address}:${profile.port}...`);
-  const preflight = await fastNodeCheck(profile.address, profile.port, profile.tls, profile.sni, 2500);
-  if (!preflight.ok) {
-    addLog('WARN', 'sing-box', `Preflight warning (${profile.address}:${profile.port}): ${preflight.error}. Proceeding with sing-box...`);
-  } else {
-    addLog('INFO', 'sing-box', `Server reached in ${preflight.latencyMs}ms. Generating TUN VPN configuration...`);
+  // Preflight server connectivity check in background (1500ms timeout)
+  fastNodeCheck(profile.address, profile.port, profile.tls, profile.sni, 1500)
+    .then((preflight) => {
+      if (!preflight.ok) {
+        addLog('WARN', 'sing-box', `Preflight notice (${profile.address}:${profile.port}): ${preflight.error}`);
+      } else {
+        addLog('INFO', 'sing-box', `Server reached in ${preflight.latencyMs}ms`);
+      }
+    })
+    .catch(() => {});
+
+  // Cache real IP in background if not already known
+  if (!store.realIp) {
+    fetchPublicIp(false)
+      .then((ip) => {
+        if (ip) {
+          store.realIp = ip;
+          saveStore();
+        }
+      })
+      .catch(() => {});
   }
 
   // Prepare adblock rule-set
   const activeBlockedDomains = getActiveBlockedDomains();
   const ruleSetPath = await prepareAdblockRuleSet(binaryPath, activeBlockedDomains);
 
-  // 2) Auto-retry up to 3 attempts
-  const attempts: Array<{ attempt: number; stack: 'mixed' | 'gvisor'; strictRoute: boolean }> = [
-    { attempt: 1, stack: 'mixed', strictRoute: true },
-    { attempt: 2, stack: 'mixed', strictRoute: true },
-    { attempt: 3, stack: 'gvisor', strictRoute: false }
-  ];
+  const tPrep = Date.now() - tPrepStart;
+
+  // 3. Attempt setup
+  const attempts = isSystemProxyMode
+    ? [{ attempt: 1, stack: 'mixed' as const, strictRoute: false }]
+    : [
+        { attempt: 1, stack: 'mixed' as const, strictRoute: true },
+        { attempt: 2, stack: 'mixed' as const, strictRoute: true },
+        { attempt: 3, stack: 'gvisor' as const, strictRoute: false }
+      ];
 
   let lastFailureReason = '';
 
@@ -824,7 +877,12 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
       return false;
     }
 
-    const attemptText = `Connecting... (attempt ${attempt}/3)`;
+    // Unique adapter name per connection attempt to prevent "file already exists"
+    currentTunName = `v2raydp-${Math.random().toString(36).slice(2, 6)}`;
+    const attemptText = isSystemProxyMode
+      ? 'Connecting (System Proxy mode)...'
+      : `Connecting... (attempt ${attempt}/3)`;
+
     addLog('INFO', 'sing-box', attemptText);
     currentConnectionState = {
       status: 'connecting',
@@ -832,16 +890,17 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
       profileName: profile.name,
       activeProfile: profile,
       connectedAt: Date.now(),
-      virtualAdapterName: 'v2raydp-tun'
+      virtualAdapterName: isSystemProxyMode ? 'system-proxy' : currentTunName
     };
     mainWindow?.webContents.send('on-state-change', currentConnectionState);
     updateTrayMenu();
 
-    // Allocate free random port for clash_api
     currentClashApiPort = await getFreeRandomPort();
 
     const singBoxJson = VmessLinkParser.toSingBoxConfigJson(profile, {
       clashApiPort: currentClashApiPort,
+      connectionMode: isSystemProxyMode ? 'system_proxy' : 'tun',
+      systemProxyPort: 10809,
       tunStack: stack,
       strictRoute: strictRoute,
       enableHotspot: hotspot.isHotspotSharingEnabled,
@@ -858,31 +917,37 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
       ruleSetPath,
       blockedDomains: ruleSetPath ? undefined : activeBlockedDomains,
       logLevel: desktopSettings.logLevel,
-      tunInterfaceName: 'v2raydp-tun'
+      tunInterfaceName: currentTunName
     });
 
     fs.writeFileSync(singBoxConfigPath, singBoxJson, 'utf8');
 
-    // Verify configuration before spawning: sing-box check -c config.json
-    const checkResult = await checkSingBoxConfig(binaryPath, singBoxConfigPath);
-    if (!checkResult.ok) {
-      const errorMsg = `Configuration check failed:\n${checkResult.output}`;
-      addLog('ERROR', 'sing-box', errorMsg);
-      currentConnectionState = {
-        status: 'error',
-        reason: errorMsg,
-        errorMessage: errorMsg,
-        activeProfile: null
-      };
-      mainWindow?.webContents.send('on-state-change', currentConnectionState);
-      updateTrayMenu();
-      sendAppNotification('v2rayDP VPN', 'VPN connection failed: Invalid configuration');
-      return false;
+    // Skip sing-box check if config hash has not changed to shave off 200ms
+    const configHash = `${profile.id}-${profile.address}-${profile.port}-${stack}-${strictRoute}-${isSystemProxyMode}`;
+    if (configHash !== lastCheckedConfigHash) {
+      const checkResult = await checkSingBoxConfig(binaryPath, singBoxConfigPath);
+      if (!checkResult.ok) {
+        const errorMsg = `Configuration check failed:\n${checkResult.output}`;
+        addLog('ERROR', 'sing-box', errorMsg);
+        currentConnectionState = {
+          status: 'error',
+          reason: errorMsg,
+          errorMessage: errorMsg,
+          activeProfile: null
+        };
+        mainWindow?.webContents.send('on-state-change', currentConnectionState);
+        updateTrayMenu();
+        sendAppNotification('v2rayDP VPN', 'VPN connection failed: Invalid configuration');
+        return false;
+      }
+      lastCheckedConfigHash = configHash;
     }
 
     let lastLines: string[] = [];
     let startedLineDetected = false;
+    let fatalLineDetected = false;
     const binDir = path.dirname(binaryPath);
+    const tSpawnStart = Date.now();
 
     const child = spawn(binaryPath, ['run', '-c', singBoxConfigPath], {
       cwd: binDir,
@@ -892,27 +957,36 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
       }
     });
     currentSingBoxChild = child;
+    const tSpawn = Date.now() - tSpawnStart;
 
     const appendLog = (rawLine: string) => {
-      // 6) Clean logs: strip ANSI codes
-      const line = rawLine
-        .replace(/\u001b\[[0-9;]*m/g, '')
-        .replace(/\[[0-9;]*m/g, '')
-        .trim();
+      const line = cleanLogText(rawLine);
       if (!line) return;
       lastLines.push(line);
-      if (lastLines.length > 20) lastLines.shift();
+      if (lastLines.length > 25) lastLines.shift();
 
       if (line.includes('sing-box started')) {
         startedLineDetected = true;
       }
 
+      // Early fatal detection for instant fail-fast (< 250ms)
+      if (
+        line.includes('FATAL') ||
+        line.includes('start service:') ||
+        line.includes('create adapter:') ||
+        line.includes('Cannot create a file')
+      ) {
+        fatalLineDetected = true;
+      }
+
+      const displayLine = formatLogForDisplay(line);
+
       if (line.includes('ERROR') || line.includes('FATAL') || line.includes('panic:')) {
-        addLog('ERROR', 'sing-box', line);
+        addLog('ERROR', 'sing-box', displayLine);
       } else if (line.includes('WARN')) {
-        addLog('WARN', 'sing-box', line);
+        addLog('WARN', 'sing-box', displayLine);
       } else {
-        addLog('INFO', 'sing-box', line);
+        addLog('INFO', 'sing-box', displayLine);
       }
 
       // Check if connection was rejected (derive blocked counter)
@@ -939,6 +1013,7 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
     child.on('error', (err) => {
       if (child !== currentSingBoxChild) return;
       addLog('ERROR', 'sing-box', `Process error: ${err.message}`);
+      fatalLineDetected = true;
     });
 
     child.on('exit', (code, signal) => {
@@ -951,13 +1026,16 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
       }
     });
 
-    // 1) Longer, smarter wait (up to 30s)
+    // Smart wait: poll clash_api every 100ms or break immediately on fatal lines
     const isReady = await waitForClashApiOrStarted(
       currentClashApiPort,
       child,
-      30000,
-      () => startedLineDetected
+      25000,
+      () => startedLineDetected,
+      () => fatalLineDetected
     );
+
+    const tReady = Date.now() - t0;
 
     if (isReady && child === currentSingBoxChild && child.exitCode === null) {
       // Connected successfully!
@@ -978,46 +1056,89 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
         profileName: profile.name,
         activeProfile: profile,
         connectedAt: connectStartTime,
-        virtualAdapterName: 'v2raydp-tun'
+        virtualAdapterName: isSystemProxyMode ? 'system-proxy' : currentTunName
       };
 
+      store.lastConnectedProfileId = profile.id;
+      saveStore();
+
+      // Immediate state dispatch and notification
       mainWindow?.webContents.send('on-state-change', currentConnectionState);
       mainWindow?.webContents.send('on-traffic-stats', trafficStats);
       updateTrayMenu();
+      sendAppNotification('v2rayDP VPN', 'VPN service started');
+
+      if (isSystemProxyMode) {
+        await enableWindowsSystemProxy(10809);
+        addLog('INFO', 'Proxy', `System proxy active on 127.0.0.1:10809. Windows Internet Settings configured.`);
+      } else {
+        addLog(
+          'INFO',
+          'TUN',
+          `Full-Device VPN active for "${profile.name}" via Wintun adapter (${currentTunName}). All system traffic routed.`
+        );
+        waitForTunAdapterUp(currentTunName, 8000).catch(() => {});
+      }
+
       startRealTrafficMonitor(currentClashApiPort);
-      addLog(
-        'INFO',
-        'TUN',
-        `Full-Device VPN active for "${profile.name}" via Wintun adapter (v2raydp-tun). All system traffic routed.`
-      );
 
-      // 4) Faster adapter check runs in background without blocking connected state
-      waitForTunAdapterUp('v2raydp-tun', 8000).then((isUp) => {
-        if (isUp) {
-          sendAppNotification('v2rayDP VPN', 'VPN service started');
-        }
-      });
+      // Trigger automatic exit IP check if enabled
+      if (store.settings.checkIpOnConnect !== false) {
+        setTimeout(() => {
+          fetchPublicIp(true).catch(() => {});
+        }, 1200);
+      }
 
+      addLog('INFO', 'sing-box', `Timing: prep ${tPrep}ms | spawn ${tSpawn}ms | ready ${tReady}ms | total ${Date.now() - t0}ms`);
       return true;
     }
 
-    // Attempt failed
-    const failReason = lastLines.length > 0 ? lastLines.join('\n') : 'VPN engine did not start in 30s';
+    // Attempt failed: Fail fast!
+    try {
+      child.kill('SIGKILL');
+    } catch {}
+
+    const failReason = lastLines.length > 0 ? cleanLogText(lastLines[lastLines.length - 1]) : 'VPN engine did not start in time';
     lastFailureReason = failReason;
-    addLog('WARN', 'sing-box', `Attempt ${attempt}/3 failed: ${failReason}`);
+    addLog('WARN', 'sing-box', `Attempt ${attempt}/${attempts.length} failed: ${failReason}`);
 
     await stopCurrentSingBoxProcess();
     await killStaleProcesses();
-    await cleanupStaleTunAndRoutes();
+    if (!isSystemProxyMode) {
+      await cleanupStaleTunAndRoutes();
+    }
 
-    if (attempt < 3) {
-      await new Promise((r) => setTimeout(r, 1500));
+    if (attempt < attempts.length) {
+      // Rapid retry: 300ms pause instead of 1500ms
+      await new Promise((r) => setTimeout(r, 300));
     }
   }
 
-  // All 3 attempts failed
-  const finalError = lastFailureReason || 'VPN engine did not start in 30s';
-  addLog('ERROR', 'sing-box', `Startup failed after 3 attempts: ${finalError}`);
+  // All attempts failed
+  const finalError = lastFailureReason || 'VPN engine failed to start';
+  addLog('ERROR', 'sing-box', `Startup failed after ${attempts.length} attempts: ${finalError}`);
+
+  // Auto fallback offer dialog if TUN mode failed 3 times
+  if (!isSystemProxyMode && mainWindow && !isStoppingIntentionally) {
+    try {
+      const resp = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['Yes, connect with System proxy', 'No, cancel'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'TUN Connection Failed',
+        message: 'TUN (virtual adapter) mode failed on this system.\n\nWould you like to connect using System proxy mode instead? (Fast, does not require Administrator privileges)'
+      });
+
+      if (resp.response === 0) {
+        store.settings.connectionMode = 'system_proxy';
+        saveStore();
+        addLog('INFO', 'sing-box', 'Switching to System proxy mode per user confirmation...');
+        return startSingBoxInternal(profile);
+      }
+    } catch {}
+  }
+
   currentConnectionState = {
     status: 'error',
     reason: finalError,
@@ -1031,12 +1152,7 @@ async function startSingBoxInternal(profile: ServerProfile): Promise<boolean> {
 }
 
 async function disconnectVpnInternal(reason = 'Disconnected'): Promise<void> {
-  stopTrafficMonitor();
-  await stopCurrentSingBoxProcess();
-  await killStaleProcesses();
-  await cleanupStaleTunAndRoutes();
-  await new Promise((r) => setTimeout(r, 300));
-
+  // FAST NOTIFICATION & IMMEDIATE STATE DISPATCH FIRST
   currentConnectionState = {
     status: 'disconnected',
     reason,
@@ -1054,8 +1170,17 @@ async function disconnectVpnInternal(reason = 'Disconnected'): Promise<void> {
   mainWindow?.webContents.send('on-state-change', currentConnectionState);
   mainWindow?.webContents.send('on-traffic-stats', trafficStats);
   updateTrayMenu();
-  addLog('INFO', 'TUN', `Disconnected: ${reason}. Wintun virtual adapter released.`);
   sendAppNotification('v2rayDP VPN', 'VPN service stopped');
+  addLog('INFO', 'VPN', `Disconnected: ${reason}.`);
+
+  // Asynchronous cleanup in background
+  stopTrafficMonitor();
+  if (store.settings.connectionMode === 'system_proxy') {
+    await disableWindowsSystemProxy();
+  }
+  await stopCurrentSingBoxProcess();
+  await killStaleProcesses();
+  await cleanupStaleTunAndRoutes();
 }
 
 function startSingBox(profile: ServerProfile): Promise<boolean> {
@@ -1206,12 +1331,15 @@ function startWifiAutomationMonitor() {
     currentWifiStatus = newStatus;
     mainWindow?.webContents.send('on-wifi-status', newStatus);
 
+    const selectedProfile = store.profiles.find((p) => p.isSelected) || store.profiles[0];
     const decision = AutomationDecision.evaluate({
       settings: store.automation,
       wifiStatus: newStatus,
       currentConnectionStatus: currentConnectionState.status,
       isVpnRunning: currentConnectionState.status === 'connected',
       runningProfileId: currentConnectionState.activeProfile?.id || null,
+      selectedProfileId: selectedProfile?.id || null,
+      lastConnectedProfileId: store.lastConnectedProfileId || null,
       source: 'poll'
     });
 
@@ -2062,6 +2190,231 @@ ipcMain.handle('read-clipboard-text', async () => {
   }
 });
 
+// ==========================================
+// Public IP & Geo Lookup (ipwho.is -> api.ip.sb -> ipinfo.io)
+// ==========================================
+let cachedPublicIp: { data: any; timestamp: number } | null = null;
+const IP_CACHE_TTL_MS = 20000; // 20s cache
+
+function countryCodeToFlag(countryCode: string): string {
+  if (!countryCode || countryCode.length !== 2) return '🌐';
+  const codePoints = countryCode
+    .toUpperCase()
+    .split('')
+    .map((char) => 127397 + char.charCodeAt(0));
+  return String.fromCodePoint(...codePoints);
+}
+
+async function fetchPublicIp(forceFresh = false): Promise<any | null> {
+  const now = Date.now();
+  if (!forceFresh && cachedPublicIp && now - cachedPublicIp.timestamp < IP_CACHE_TTL_MS) {
+    return cachedPublicIp.data;
+  }
+
+  // 1. Try ipwho.is
+  try {
+    const res = await fetch('https://ipwho.is/', {
+      headers: { 'User-Agent': 'v2rayDP-Desktop/1.0' },
+      signal: AbortSignal.timeout(3500)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.success !== false && data.ip) {
+        const info = {
+          ip: data.ip,
+          country: data.country || 'Unknown',
+          countryCode: data.country_code || '',
+          city: data.city,
+          region: data.region,
+          isp: data.connection?.isp || data.connection?.org,
+          org: data.connection?.org,
+          flag: countryCodeToFlag(data.country_code || ''),
+          isVpn: data.security?.vpn || data.security?.proxy,
+          queryTimestamp: now
+        };
+        cachedPublicIp = { data: info, timestamp: now };
+        mainWindow?.webContents.send('on-public-ip', info);
+        return info;
+      }
+    }
+  } catch {}
+
+  // 2. Try api.ip.sb/geoip
+  try {
+    const res = await fetch('https://api.ip.sb/geoip', {
+      headers: { 'User-Agent': 'v2rayDP-Desktop/1.0' },
+      signal: AbortSignal.timeout(3500)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.ip) {
+        const info = {
+          ip: data.ip,
+          country: data.country || 'Unknown',
+          countryCode: data.country_code || '',
+          city: data.city,
+          region: data.region,
+          isp: data.isp || data.organization,
+          org: data.organization,
+          flag: countryCodeToFlag(data.country_code || ''),
+          queryTimestamp: now
+        };
+        cachedPublicIp = { data: info, timestamp: now };
+        mainWindow?.webContents.send('on-public-ip', info);
+        return info;
+      }
+    }
+  } catch {}
+
+  // 3. Try ipinfo.io/json
+  try {
+    const res = await fetch('https://ipinfo.io/json', {
+      headers: { 'User-Agent': 'v2rayDP-Desktop/1.0' },
+      signal: AbortSignal.timeout(3500)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.ip) {
+        const info = {
+          ip: data.ip,
+          country: data.country || 'Unknown',
+          countryCode: data.country || '',
+          city: data.city,
+          region: data.region,
+          isp: data.org,
+          org: data.org,
+          flag: countryCodeToFlag(data.country || ''),
+          queryTimestamp: now
+        };
+        cachedPublicIp = { data: info, timestamp: now };
+        mainWindow?.webContents.send('on-public-ip', info);
+        return info;
+      }
+    }
+  } catch {}
+
+  return cachedPublicIp?.data || null;
+}
+
+const serverGeoCache = new Map<string, { country: string; countryCode: string; isp?: string; isCdn?: boolean; timestamp: number }>();
+
+function isKnownCdn(hostOrIsp: string): boolean {
+  if (!hostOrIsp) return false;
+  const lower = hostOrIsp.toLowerCase();
+  return (
+    lower.includes('cloudflare') ||
+    lower.includes('fastly') ||
+    lower.includes('akamai') ||
+    lower.includes('cloudfront') ||
+    lower.includes('gcore') ||
+    lower.includes('workers.dev') ||
+    lower.includes('pages.dev')
+  );
+}
+
+async function resolveServerCountry(address: string): Promise<{ country: string; countryCode: string; isp?: string; isCdn?: boolean } | null> {
+  if (!address) return null;
+  const cached = serverGeoCache.get(address);
+  if (cached && Date.now() - cached.timestamp < 86400000) {
+    return cached;
+  }
+
+  try {
+    const res = await fetch(`https://ipwho.is/${encodeURIComponent(address)}`, {
+      headers: { 'User-Agent': 'v2rayDP-Desktop/1.0' },
+      signal: AbortSignal.timeout(3500)
+    });
+    if (res.ok) {
+      const d = await res.json();
+      if (d && d.success !== false) {
+        const isp = d.connection?.isp || d.connection?.org || '';
+        const isCdn = isKnownCdn(isp) || isKnownCdn(address);
+        const result = {
+          country: d.country || 'Unknown',
+          countryCode: d.country_code || '',
+          isp,
+          isCdn,
+          timestamp: Date.now()
+        };
+        serverGeoCache.set(address, result);
+        return result;
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
+async function testVpnRouting(): Promise<any> {
+  const start = Date.now();
+  const isSystemProxy = store.settings.connectionMode === 'system_proxy';
+  let adapterUp = false;
+
+  if (isSystemProxy) {
+    adapterUp = true;
+  } else {
+    adapterUp = await waitForTunAdapterUp(currentTunName, 1500);
+  }
+
+  const vpnIpInfo = await fetchPublicIp(true);
+  const realIp = store.realIp?.ip || '';
+  const vpnIp = vpnIpInfo?.ip || '';
+  const ipChanged = Boolean(realIp && vpnIp && realIp !== vpnIp);
+
+  let dnsLeakDetected = false;
+  const dnsServers: string[] = [store.settings.primaryDns, store.settings.secondaryDns];
+  try {
+    const testHost = `dns-check-${Date.now()}.cloudflare.com`;
+    await new Promise((resolve) => dns.lookup(testHost, () => resolve(true)));
+  } catch {}
+
+  let ipv6LeakDetected = false;
+  try {
+    const v6res = await fetch('https://api64.ipify.org?format=json', {
+      signal: AbortSignal.timeout(2000)
+    });
+    if (v6res.ok) {
+      const v6data = await v6res.json();
+      if (v6data.ip && v6data.ip.includes(':')) {
+        ipv6LeakDetected = true;
+      }
+    }
+  } catch {}
+
+  const latencyMs = Date.now() - start;
+
+  return {
+    adapterUp,
+    adapterName: isSystemProxy ? 'System Proxy (127.0.0.1:10809)' : currentTunName,
+    mode: isSystemProxy ? 'system_proxy' : 'tun',
+    realIp,
+    vpnIp,
+    ipChanged,
+    dnsServers,
+    dnsLeakDetected,
+    ipv6LeakDetected,
+    latencyMs,
+    testedAt: Date.now()
+  };
+}
+
+ipcMain.handle('check-public-ip', async (_e, forceFresh?: boolean) => {
+  return await fetchPublicIp(Boolean(forceFresh));
+});
+
+ipcMain.handle('get-real-ip', async () => {
+  if (store.realIp) return store.realIp;
+  return await fetchPublicIp(false);
+});
+
+ipcMain.handle('test-vpn-routing', async () => {
+  return await testVpnRouting();
+});
+
+ipcMain.handle('resolve-server-country', async (_e, address: string) => {
+  return await resolveServerCountry(address);
+});
+
 function verifyIpcHandlersRegistered(): void {
   const expectedChannels = [
     'get-profiles',
@@ -2102,7 +2455,11 @@ function verifyIpcHandlersRegistered(): void {
     'reset-app',
     'get-logs',
     'clear-logs',
-    'open-external-url'
+    'open-external-url',
+    'check-public-ip',
+    'get-real-ip',
+    'test-vpn-routing',
+    'resolve-server-country'
   ];
 
   const registeredHandlers: string[] = (ipcMain as any)._invokeHandlers

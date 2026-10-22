@@ -107,6 +107,12 @@ contextBridge.exposeInMainWorld('api', {
     return '';
   },
 
+  // IP & Routing Check
+  checkPublicIp: (forceFresh?: boolean) => ipcRenderer.invoke('check-public-ip', forceFresh),
+  getRealIp: () => ipcRenderer.invoke('get-real-ip'),
+  testVpnRouting: () => ipcRenderer.invoke('test-vpn-routing'),
+  resolveServerCountry: (address: string) => ipcRenderer.invoke('resolve-server-country', address),
+
   // Helpers
   openExternalUrl: (url: string) => ipcRenderer.invoke('open-external-url', url),
   copyToClipboard: async (text: string) => {

@@ -876,6 +876,82 @@ export function initMockApi(): ApiInterface {
       return '';
     },
 
+    // --- IP & ROUTING CHECK ---
+    checkPublicIp: async (forceFresh = false) => {
+      const isConnected = connectionState.status === 'connected';
+      if (isConnected) {
+        return {
+          ip: '104.28.19.45',
+          country: 'Singapore',
+          countryCode: 'SG',
+          city: 'Singapore',
+          region: 'Central',
+          isp: 'Cloudflare, Inc.',
+          org: 'Cloudflare',
+          flag: '🇸🇬',
+          isVpn: true,
+          queryTimestamp: Date.now()
+        };
+      }
+      return {
+        ip: '185.220.101.5',
+        country: 'Germany',
+        countryCode: 'DE',
+        city: 'Frankfurt',
+        region: 'Hesse',
+        isp: 'Deutsche Telekom AG',
+        org: 'Deutsche Telekom',
+        flag: '🇩🇪',
+        isVpn: false,
+        queryTimestamp: Date.now()
+      };
+    },
+
+    getRealIp: async () => {
+      return {
+        ip: '185.220.101.5',
+        country: 'Germany',
+        countryCode: 'DE',
+        city: 'Frankfurt',
+        region: 'Hesse',
+        isp: 'Deutsche Telekom AG',
+        org: 'Deutsche Telekom',
+        flag: '🇩🇪',
+        isVpn: false,
+        queryTimestamp: Date.now()
+      };
+    },
+
+    testVpnRouting: async () => {
+      const isConnected = connectionState.status === 'connected';
+      return {
+        adapterUp: isConnected,
+        adapterName: isConnected ? 'v2raydp-tun' : 'None',
+        mode: 'tun',
+        realIp: '185.220.101.5',
+        vpnIp: isConnected ? '104.28.19.45' : '185.220.101.5',
+        ipChanged: isConnected,
+        dnsServers: ['1.1.1.1', '8.8.8.8'],
+        dnsLeakDetected: false,
+        ipv6LeakDetected: false,
+        latencyMs: isConnected ? 42 : 12,
+        testedAt: Date.now()
+      };
+    },
+
+    resolveServerCountry: async (address: string) => {
+      if (address.includes('sg') || address.includes('singapore')) {
+        return { country: 'Singapore', countryCode: 'SG', isp: 'DigitalOcean', isCdn: false };
+      }
+      if (address.includes('us') || address.includes('la')) {
+        return { country: 'United States', countryCode: 'US', isp: 'Cloudflare, Inc.', isCdn: true };
+      }
+      if (address.includes('de') || address.includes('fra')) {
+        return { country: 'Germany', countryCode: 'DE', isp: 'Hetzner Online GmbH', isCdn: false };
+      }
+      return { country: 'Global Node', countryCode: 'UN', isp: 'Global Anycast', isCdn: true };
+    },
+
     // --- SYSTEM HELPERS ---
     openExternalUrl: async (url) => {
       window.open(url, '_blank');
