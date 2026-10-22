@@ -414,6 +414,15 @@ export function initMockApi(): ApiInterface {
       return true;
     },
 
+    deleteAllProfiles: async () => {
+      if (connectionState.status === 'connected' || connectionState.status === 'connecting') {
+        await mockApi.stopVpn('User removed all configurations');
+      }
+      localStorage.setItem(STORAGE_KEYS.PROFILES, JSON.stringify([]));
+      addLog('INFO', 'Config', 'Removed all profiles');
+      return true;
+    },
+
     selectProfile: async (id) => {
       const profiles = await mockApi.getProfiles();
       const selected = profiles.find(p => p.id === id) || null;

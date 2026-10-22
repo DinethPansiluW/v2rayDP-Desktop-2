@@ -33,8 +33,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   const [connectionMode, setConnectionMode] = useState<'tun' | 'system_proxy'>(
     settings.connectionMode === 'system_proxy' ? 'system_proxy' : 'tun'
   );
-  const [showIpOnHome, setShowIpOnHome] = useState(settings.showIpOnHome !== false);
-  const [checkIpOnConnect, setCheckIpOnConnect] = useState(settings.checkIpOnConnect !== false);
   const [primaryDns, setPrimaryDns] = useState(settings.primaryDns || '1.1.1.1');
   const [secondaryDns, setSecondaryDns] = useState(settings.secondaryDns || '8.8.8.8');
   const [isBypassLan, setIsBypassLan] = useState(settings.isBypassLan !== false);
@@ -57,8 +55,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
       ...settings,
       mode: 'tun',
       connectionMode,
-      showIpOnHome,
-      checkIpOnConnect,
       primaryDns: primaryDns.trim() || '1.1.1.1',
       secondaryDns: secondaryDns.trim() || '8.8.8.8',
       isBypassLan,
@@ -194,48 +190,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
               <p className="text-xs text-slate-300 leading-relaxed">
                 Mixed inbound on 127.0.0.1:10809 via Windows Internet Settings. Instant ~1s connection, does NOT require Administrator privileges.
               </p>
-            </div>
-          </div>
-        </div>
-
-        {/* IP & Country Privacy Verification */}
-        <div className="bg-[#111827] border border-slate-800 rounded-2xl p-5 shadow-lg space-y-4">
-          <h3 className="text-sm font-bold text-white uppercase tracking-wider text-cyan-400 flex items-center space-x-2">
-            <ShieldCheck className="w-4 h-4" />
-            <span>IP & Country Privacy Check</span>
-          </h3>
-
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-semibold text-slate-200">Show IP & Country Card on Home</h4>
-                <p className="text-xs text-slate-400">
-                  Displays your real public IP and current VPN exit IP card on the dashboard
-                </p>
-              </div>
-              <input
-                type="checkbox"
-                checked={showIpOnHome}
-                onChange={(e) => setShowIpOnHome(e.target.checked)}
-                className="w-4 h-4 accent-cyan-400 cursor-pointer"
-              />
-            </div>
-
-            <div className="h-px bg-slate-800" />
-
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-semibold text-slate-200">Check Exit IP Automatically on Connect</h4>
-                <p className="text-xs text-slate-400">
-                  Automatically queries public IP endpoints to verify encrypted tunnel routing immediately after connection
-                </p>
-              </div>
-              <input
-                type="checkbox"
-                checked={checkIpOnConnect}
-                onChange={(e) => setCheckIpOnConnect(e.target.checked)}
-                className="w-4 h-4 accent-cyan-400 cursor-pointer"
-              />
             </div>
           </div>
         </div>

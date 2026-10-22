@@ -1726,6 +1726,16 @@ ipcMain.handle('delete-profile', async (_e, id: string) => {
   return true;
 });
 
+ipcMain.handle('delete-all-profiles', async () => {
+  if (currentConnectionState.status === 'connected' || currentConnectionState.status === 'connecting') {
+    await disconnectVpn('User removed all configurations');
+  }
+  store.profiles = [];
+  saveStore();
+  addLog('INFO', 'app', 'All VPN profiles removed by user');
+  return true;
+});
+
 ipcMain.handle('select-profile', async (_e, id: string) => {
   let selected: ServerProfile | null = null;
   store.profiles.forEach((p) => {

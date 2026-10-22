@@ -225,6 +225,7 @@ export interface ApiInterface {
   getProfiles: () => Promise<ServerProfile[]>;
   saveProfile: (profile: Partial<ServerProfile> & { id?: string }) => Promise<ServerProfile>;
   deleteProfile: (id: string) => Promise<boolean>;
+  deleteAllProfiles: () => Promise<boolean>;
   selectProfile: (id: string) => Promise<boolean>;
   duplicateProfile: (id: string) => Promise<ServerProfile>;
   importProfilesFromText: (text: string) => Promise<{ added: number; errors: string[]; skipped?: number }>;

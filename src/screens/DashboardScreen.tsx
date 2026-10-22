@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ServerProfile, ConnectionState, TrafficStats, AppLog, PublicIpInfo } from '../core/types';
+import { ServerProfile, ConnectionState, TrafficStats, AppLog } from '../core/types';
 import {
   Play,
   Square,
@@ -24,15 +24,12 @@ import {
   Layers,
   Check,
   ChevronDown,
-  ChevronUp,
-  Globe,
-  ShieldCheck
+  ChevronUp
 } from 'lucide-react';
 import { VmessLinkParser } from '../core/VmessLinkParser';
 import { QrCodeModal } from '../components/QrCodeModal';
 import { SingBoxConfigModal } from '../components/SingBoxConfigModal';
 import { EditProfileModal } from '../components/EditProfileModal';
-import { VpnRoutingModal } from '../components/VpnRoutingModal';
 
 interface DashboardScreenProps {
   connectionState: ConnectionState;
@@ -44,6 +41,7 @@ interface DashboardScreenProps {
   onSelectProfile: (profileId: string) => Promise<boolean>;
   onSaveProfile: (profile: Partial<ServerProfile>) => Promise<void>;
   onDeleteProfile: (profileId: string) => Promise<boolean>;
+  onDeleteAllProfiles: () => Promise<boolean>;
   onDuplicateProfile: (profileId: string) => Promise<ServerProfile>;
   onTestPing: (profileId: string) => Promise<number>;
   onTestAllPings: () => Promise<Record<string, number>>;
@@ -62,6 +60,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   onSelectProfile,
   onSaveProfile,
   onDeleteProfile,
+  onDeleteAllProfiles,
   onDuplicateProfile,
   onTestPing,
   onTestAllPings,
@@ -103,11 +102,11 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   const [logFilter, setLogFilter] = useState<'ALL' | 'ERROR'>('ALL');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // IP & Country check state
-  const [publicIp, setPublicIp] = useState<PublicIpInfo | null>(null);
-  const [realIp, setRealIp] = useState<PublicIpInfo | null>(null);
-  const [isCheckingIp, setIsCheckingIp] = useState(false);
-  const [isRoutingModalOpen, setIsRoutingModalOpen] = useState(false);
+  // Remove All Configs confirmation modal
+  const [isDeleteAllModalOpen, setIsDeleteAllModalOpen] = useState(false);
+  const [isDeletingAll, setIsDeletingAll] = useState(false);
+
+  // Lazy resolve node server countries
   const [geoCache, setGeoCache] = useState<Record<string, { country: string; countryCode: string; flag: string; isCdn?: boolean }>>({});
 
   const countryCodeToFlag = (countryCode: string): string => {
@@ -118,24 +117,6 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
       .map((char) => 127397 + char.charCodeAt(0));
     return String.fromCodePoint(...codePoints);
   };
-
-  const refreshIp = async (forceFresh = false) => {
-    setIsCheckingIp(true);
-    try {
-      const [freshIp, origIp] = await Promise.all([
-        window.api?.checkPublicIp ? window.api.checkPublicIp(forceFresh) : Promise.resolve(null),
-        window.api?.getRealIp ? window.api.getRealIp() : Promise.resolve(null)
-      ]);
-      if (freshIp) setPublicIp(freshIp);
-      if (origIp) setRealIp(origIp);
-    } catch {} finally {
-      setIsCheckingIp(false);
-    }
-  };
-
-  useEffect(() => {
-    refreshIp(false);
-  }, [isConnected]);
 
   // Lazy resolve node server countries
   useEffect(() => {
@@ -462,12 +443,23 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                 </button>
                 <div className="h-px bg-slate-800 my-1" />
                 <button
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    setIsDeleteAllModalOpen(true);
+                  }}
+                  disabled={profiles.length === 0}
+                  className="w-full px-3 py-2 text-left text-red-400 hover:text-red-300 hover:bg-red-950/40 flex items-center space-x-2 transition-colors disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                  <span className="font-semibold">Remove All Configs</span>
+                </button>
+                <button
                   onClick={async () => {
                     await onClearLogs();
                     showToast('Logs cleared');
                     setIsMenuOpen(false);
                   }}
-                  className="w-full px-3 py-2 text-left text-slate-400 hover:text-red-400 hover:bg-slate-800/80 flex items-center space-x-2"
+                  className="w-full px-3 py-2 text-left text-slate-400 hover:text-white hover:bg-slate-800/80 flex items-center space-x-2"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>Clear System Logs</span>
@@ -548,73 +540,6 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
               {isConnected ? formatDuration(trafficStats.connectedDurationSeconds) : '00:00'}
             </div>
           </div>
-        </div>
-      </div>
-
-      {/* NetMod Style IP Card */}
-      <div className="bg-[#111827] border border-slate-800 rounded-2xl p-3.5 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 rounded-xl bg-cyan-950/40 border border-cyan-800/50 flex items-center justify-center text-cyan-400 shrink-0">
-            <Globe className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <span className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Public IP & Country</span>
-              {isConnected ? (
-                publicIp?.ip && realIp?.ip && publicIp.ip !== realIp.ip ? (
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950/80 border border-emerald-500/50 text-emerald-300">
-                    IP Changed
-                  </span>
-                ) : (
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950/80 border border-amber-500/50 text-amber-300">
-                    Same IP / Country
-                  </span>
-                )
-              ) : (
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-900 border border-slate-800 text-slate-400">
-                  VPN Idle
-                </span>
-              )}
-            </div>
-
-            <div className="flex items-center space-x-3 text-xs mt-1">
-              <div>
-                <span className="text-slate-500 text-[10px] mr-1">Exit:</span>
-                <span className="font-mono font-bold text-white">
-                  {publicIp?.flag || '🌐'} {publicIp?.ip || 'Checking...'}
-                </span>
-                {publicIp?.countryCode && (
-                  <span className="text-slate-400 ml-1 font-mono text-[11px]">({publicIp.countryCode})</span>
-                )}
-              </div>
-              {realIp?.ip && (
-                <div className="hidden sm:block text-slate-400">
-                  <span className="text-slate-500 text-[10px] mr-1">Real:</span>
-                  <span className="font-mono text-slate-300">{realIp.flag || '🌐'} {realIp.ip}</span>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center space-x-2 shrink-0">
-          <button
-            onClick={() => refreshIp(true)}
-            disabled={isCheckingIp}
-            title="Refresh Exit IP"
-            className="px-2.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 hover:border-cyan-500/40 text-slate-300 hover:text-cyan-300 text-xs font-semibold flex items-center space-x-1.5 transition-colors cursor-pointer disabled:opacity-50"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${isCheckingIp ? 'animate-spin text-cyan-400' : ''}`} />
-            <span>Refresh</span>
-          </button>
-          <button
-            onClick={() => setIsRoutingModalOpen(true)}
-            title="Test VPN routing and leak diagnostics"
-            className="px-3 py-1.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-300 text-xs font-bold flex items-center space-x-1.5 transition-colors cursor-pointer"
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Test Routing</span>
-          </button>
         </div>
       </div>
 
@@ -931,12 +856,57 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         />
       )}
 
-      {/* VPN Routing Diagnostic Modal */}
-      <VpnRoutingModal
-        isOpen={isRoutingModalOpen}
-        onClose={() => setIsRoutingModalOpen(false)}
-        isConnected={isConnected}
-      />
+      {/* Remove All Configs Confirmation Modal */}
+      {isDeleteAllModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4 animate-fade-in">
+          <div className="bg-[#111827] border border-red-500/40 rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl shadow-red-950/50">
+            <div className="flex items-center space-x-3 text-white font-bold text-base">
+              <div className="w-10 h-10 rounded-xl bg-red-950/80 border border-red-500/40 text-red-400 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-white font-bold text-base">Remove All Configs?</h3>
+                <p className="text-xs text-slate-400">Permanently delete all profiles</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Are you sure you want to remove all <span className="text-white font-bold font-mono">{profiles.length}</span> VPN configurations?
+              {isConnected && ' Any active VPN tunnel will be disconnected.'}
+              <span className="text-red-400 font-medium block mt-1.5">This action cannot be undone.</span>
+            </p>
+
+            <div className="flex items-center justify-end space-x-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsDeleteAllModalOpen(false)}
+                disabled={isDeletingAll}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  setIsDeletingAll(true);
+                  try {
+                    await onDeleteAllProfiles();
+                    setIsDeleteAllModalOpen(false);
+                    showToast('All configurations removed');
+                  } finally {
+                    setIsDeletingAll(false);
+                  }
+                }}
+                disabled={isDeletingAll}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/30 transition-all flex items-center space-x-2 cursor-pointer disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeletingAll ? 'Removing...' : 'Remove All Configs'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

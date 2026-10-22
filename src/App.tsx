@@ -255,6 +255,21 @@ export default function App() {
     return ok;
   };
 
+  const handleDeleteAllProfiles = async (): Promise<boolean> => {
+    if (!window.api) return false;
+    try {
+      const ok = await window.api.deleteAllProfiles();
+      if (ok) {
+        setProfiles([]);
+        showToast('All configurations removed', 'info');
+      }
+      return ok;
+    } catch (err: unknown) {
+      showToast((err as Error).message, 'error');
+      return false;
+    }
+  };
+
   const handleDuplicateProfile = async (id: string): Promise<ServerProfile> => {
     if (!window.api) throw new Error('API unavailable');
     const dup = await window.api.duplicateProfile(id);
@@ -412,6 +427,7 @@ export default function App() {
               onSelectProfile={handleSelectProfile}
               onSaveProfile={handleSaveProfile}
               onDeleteProfile={handleDeleteProfile}
+              onDeleteAllProfiles={handleDeleteAllProfiles}
               onDuplicateProfile={handleDuplicateProfile}
               onTestPing={handleTestPing}
               onTestAllPings={handleTestAllPings}

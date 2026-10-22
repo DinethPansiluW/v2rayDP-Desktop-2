@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('api', {
   getProfiles: () => ipcRenderer.invoke('get-profiles'),
   saveProfile: (profile: Partial<ServerProfile>) => ipcRenderer.invoke('save-profile', profile),
   deleteProfile: (id: string) => ipcRenderer.invoke('delete-profile', id),
+  deleteAllProfiles: () => ipcRenderer.invoke('delete-all-profiles'),
   selectProfile: (id: string) => ipcRenderer.invoke('select-profile', id),
   duplicateProfile: (id: string) => ipcRenderer.invoke('duplicate-profile', id),
   importProfilesFromText: (text: string) => ipcRenderer.invoke('import-profiles-text', text),
